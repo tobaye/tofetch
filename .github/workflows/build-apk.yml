@@ -1,0 +1,61 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - 'server.py'
+      - 'static/**'
+      - 'aria2.conf'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Stage python payload (single source of truth = repo root)
+        run: |
+          cp server.py aria2.conf android/app/src/main/python/
+          cp -r static android/app/src/main/python/
+
+      - name: Fetch aria2 engines (Aria2 Next v3.1.0, checksums pinned)
+        run: |
+          base=https://github.com/AnInsomniacy/aria2-next/releases/download/v3.1.0
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
+          curl -fsSL -o /tmp/a64 "$base/aria2-next-3.1.0-android-arm64"
+          curl -fsSL -o /tmp/x64 "$base/aria2-next-3.1.0-linux-x86_64"
+          echo "7e4ce96d2e29bf4f1dff0f0d0bc737488883cc6791c1795208f7f634994c80e3  /tmp/a64" | sha256sum -c -
+          echo "5a264fc39312cc1abc6d12cfd2d96464d27f0349fd7cb5e0cbf1ee5bd686e890  /tmp/x64" | sha256sum -c -
+          cp /tmp/a64 android/app/src/main/jniLibs/arm64-v8a/libaria2c.so
+          cp /tmp/x64 android/app/src/main/jniLibs/x86_64/libaria2c.so
+
+      - name: Build APK (debug-signed for now)
+        working-directory: android
+        run: gradle assembleDebug --stacktrace
+
+      - name: Attach APK to the v1.0.0 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -1)
+          echo "built: $apk"
+          cp "$apk" ToFetch-Android.apk
+          gh release upload v1.0.0 ToFetch-Android.apk --clobber || \
+            gh release create v1.0.0 --title "ToFetch 1.0.0" \
+              --notes "ToFetch 1.0.0 - a tiny self-hosted download manager. Android APK (debug-signed test build), plus the server / desktop packages." \
+              ToFetch-Android.apk

@@ -10,3 +10,10 @@ pkg-linux/
 pkg-android/
 ANDROID-RETEST-*.md
 LINUX-TEST-REPORT.md
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/
+android/app/src/main/python/server.py
+android/app/src/main/python/aria2.conf
+android/app/src/main/python/static/
