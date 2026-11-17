@@ -1,6 +1,6 @@
 # ToFetch 路线图
 
-来自 v1.0/v1.1 的实测反馈与竞品调研（Motrix v2、Rayburst、AriaNg、Persepolis、
+来自实测反馈与竞品调研（Motrix v2、Rayburst、AriaNg、Persepolis、
 Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：单文件后端、
 零依赖、零 CDN；新行为类功能一律做成开关且默认关。
 
@@ -18,7 +18,7 @@ Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：�
   Linux systemd/aarch64 等）只改各自包，但搭同一批车发布。
 - 每批做完用 tests/run_tests.py 全套回归（S1 软失败项在会话保存修复后转正）。
 
-## 已完成（v1.2.0，可靠性批）
+## 已完成（可靠性批，首发即含）
 - 每次 addUri/addTorrent 成功后立即 saveSession；--save-session-interval
   30→5s（「加任务后立即强杀丢任务」已修，回归 T7 转正，8/8 全绿）
 - 三个本地包启动脚本默认 TOFETCH_HOST=127.0.0.1（仅本地包；服务器版维持
@@ -29,7 +29,7 @@ Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：�
 - README 与各包说明写明已知限制：强杀后进度回滚（实测 26MB→8MB），
   任务不丢、文件最终正确性不受影响
 
-## 已完成（v1.1.0）
+## 已完成（首发即含）
 - 引擎启动失败在 UI 显眼报错并给出原因（不再静默 engine:false）
 - 诊断日志落盘（data/tofetch.log + aria2.log），UI 可导出
 - install.sh：镜像失败自动换源、按架构选引擎、install.log、结尾真自检
@@ -45,6 +45,9 @@ Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：�
 - 批量添加：通配符展开（file[01-10].zip）、逐项勾选确认
 - Tracker 列表定时更新（changeGlobalOption 热更新，失败回退旧列表）
 - 已完成历史落盘（JSON 存数据目录，重启不丢，带清理入口）
+- 全局选项持久化：全局限速等全局选项存进 data 目录、启动时自动恢复
+- 安卓 APK 打包（进行中）：Chaquopy 封装同一套 server.py / UI，GitHub
+  Actions 构建出 APK 挂 Release；通过实测后作为安卓版的正式形态
 
 ## 再下一批
 - BT 添加后先取元数据、文件树勾选再下载（select-file）
@@ -63,5 +66,4 @@ Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：�
 - IDM 式动态分段（引擎内部调度，aria2 做不了也不必做）
 - 云端离线下载/秒传/P2SP（依赖运营方基础设施，与自托管定位冲突）
 - 插件系统/站点解析器（需 JS 沙箱，违背零依赖）
-- 原生安卓 App（Termux + Web UI 形态已成立）
-- 全局选项持久化：全局限速等全局选项存进 data 目录、启动时自动恢复（2026-11-18 安卓复测建议，先记下，功能批再做）
+- 原生重写安卓 App（Termux 形态与 APK 封装形态均已成立，不另起原生工程）
