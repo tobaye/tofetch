@@ -3,3 +3,10 @@ data/
 tools/
 __pycache__/
 *.pyc
+dist/
+dist-build/
+pkg/
+pkg-linux/
+pkg-android/
+ANDROID-RETEST-*.md
+LINUX-TEST-REPORT.md
