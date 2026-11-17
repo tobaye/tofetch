@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ToFetch 下载管理</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a222c; --panel2:#212c38; --line:#2c3947;
+    --text:#e6edf3; --dim:#8b98a5; --accent:#d4a017; --accent2:#b8860b;
+    --ok:#3fb950; --warn:#d29922; --err:#f85149; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+         padding:10px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .logo{font-size:19px;font-weight:700;letter-spacing:.5px}
+  .logo span{color:var(--accent)}
+  .stats{color:var(--dim);font-size:13px;display:flex;gap:14px;flex-wrap:wrap}
+  .stats b{color:var(--text);font-weight:600}
+  .spacer{flex:1}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+         padding:6px 13px;border-radius:8px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#161006;font-weight:600}
+  button.primary:hover{background:var(--accent2)}
+  button.danger:hover{border-color:var(--err);color:var(--err)}
+  main{max-width:980px;margin:0 auto;padding:16px}
+  .task{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+        padding:12px 14px;margin-bottom:10px}
+  .task .name{font-weight:600;word-break:break-all}
+  .task .meta{color:var(--dim);font-size:12.5px;margin-top:2px;display:flex;gap:12px;flex-wrap:wrap}
+  .bar{height:8px;background:var(--panel2);border-radius:99px;margin-top:9px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
+  .task.done .bar i{background:var(--ok)}
+  .task.error .bar i{background:var(--err)}
+  .row{display:flex;align-items:flex-start;gap:10px}
+  .row .grow{flex:1;min-width:0}
+  .acts{display:flex;gap:6px;flex-shrink:0}
+  .acts button{padding:4px 9px;font-size:12.5px}
+  .chip{font-size:11.5px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
+  .chip.active{color:var(--accent);border-color:var(--accent)}
+  .chip.complete{color:var(--ok);border-color:var(--ok)}
+  .chip.error{color:var(--err);border-color:var(--err)}
+  .empty{color:var(--dim);text-align:center;padding:44px 0}
+  .engine-bad{background:#3d1d1d;border:1px solid var(--err);color:#ffb4ab;
+              border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;
+              font-size:13.5px;word-break:break-all}
+  .stall{color:var(--warn)}
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);
+         border-radius:12px;padding:20px;width:min(560px,92vw)}
+  dialog::backdrop{background:rgba(0,0,0,.6)}
+  dialog h3{margin:0 0 12px}
+  textarea,input[type=text],input[type=password],input[type=number]{
+    width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font:inherit;margin-bottom:10px}
+  textarea{min-height:110px;resize:vertical}
+  label{font-size:13px;color:var(--dim);display:block;margin-bottom:4px}
+  .dlg-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+  #login{position:fixed;inset:0;background:var(--bg);z-index:50;display:none;
+         align-items:center;justify-content:center}
+  #login .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+              padding:26px;width:min(340px,90vw)}
+  .hint{color:var(--dim);font-size:12.5px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="box">
+    <div class="logo" style="margin-bottom:14px">Tob<span>Down</span></div>
+    <label>密码</label>
+    <input type="password" id="loginPw" placeholder="输入访问密码" autocomplete="current-password">
+    <button class="primary" style="width:100%" onclick="doLogin()">登录</button>
+    <p class="hint" id="loginErr" style="color:var(--err)"></p>
+  </div>
+</div>
+
+<header>
+  <div class="logo">Tob<span>Down</span></div>
+  <div class="stats">
+    <span>↓ <b id="gDown">0 B/s</b></span>
+    <span>↑ <b id="gUp">0 B/s</b></span>
+    <span>进行中 <b id="gActive">0</b></span>
+    <span>等待 <b id="gWaiting">0</b></span>
+  </div>
+  <div class="spacer"></div>
+  <button class="primary" onclick="openAdd()">＋ 添加任务</button>
+  <button onclick="rpc('unpauseAll')">全部继续</button>
+  <button onclick="rpc('pauseAll')">全部暂停</button>
+  <button onclick="openSettings()">限速设置</button>
+  <a href="/api/log" download><button>诊断日志</button></a>
+  <button id="logoutBtn" style="display:none" onclick="doLogout()">退出</button>
+</header>
+
+<main>
+  <div id="engineWarn" class="engine-bad" style="display:none"></div>
+  <div id="list"></div>
+  <div id="empty" class="empty" style="display:none">还没有任务。点右上角「添加任务」，粘贴链接或磁力链就能开始。</div>
+  <p class="hint" id="dirHint"></p>
+</main>
+
+<dialog id="addDlg">
+  <h3>添加任务</h3>
+  <label>链接（每行一个，支持 http / https / ftp / 磁力链）</label>
+  <textarea id="addUrls" placeholder="https://example.com/file.zip&#10;magnet:?xt=urn:btih:..."></textarea>
+  <label>或选择种子文件（.torrent）</label>
+  <input type="file" id="addTorrent" accept=".torrent">
+  <label>保存到子目录（可空，相对于下载目录）</label>
+  <input type="text" id="addDir" placeholder="例如：电影">
+  <div class="dlg-btns">
+    <button onclick="addDlg.close()">取消</button>
+    <button class="primary" onclick="submitAdd()">开始下载</button>
+  </div>
+</dialog>
+
+<dialog id="setDlg">
+  <h3>限速设置</h3>
+  <label>最大下载速度（KB/s，0 = 不限）</label>
+  <input type="number" id="setDown" min="0">
+  <label>最大上传速度（KB/s，0 = 不限）</label>
+  <input type="number" id="setUp" min="0">
+  <label>同时下载任务数</label>
+  <input type="number" id="setConc" min="1" max="20">
+  <div class="dlg-btns">
+    <button onclick="setDlg.close()">取消</button>
+    <button class="primary" onclick="submitSettings()">保存</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const addDlg = $("#addDlg"), setDlg = $("#setDlg");
+let needLogin = false;
+
+async function api(path, body){
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify(body||{})});
+  if (r.status === 401){ showLogin(); throw new Error("login"); }
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP "+r.status));
+  return j;
+}
+async function rpc(method, params){
+  const j = await api("/api/rpc", {method, params: params||[]});
+  return j.result;
+}
+async function multicall(calls){
+  const j = await api("/api/rpc", {method:"system.multicall",
+    params:[calls.map(c=>({methodName:"aria2."+c[0], params:c[1]||[]}))]});
+  return (j.result||[]).map(x => Array.isArray(x) ? x[0] : x);
+}
+
+function fmtBytes(n){
+  n = Number(n)||0; const u=["B","KB","MB","GB","TB"]; let i=0;
+  while (n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return n.toFixed(n>=100||i===0?0:1)+" "+u[i];
+}
+function fmtSpeed(n){ return fmtBytes(n)+"/s"; }
+function fmtEta(sec){
+  sec = Number(sec)||0; if (!isFinite(sec)||sec<=0) return "";
+  if (sec<60) return "约 "+Math.round(sec)+" 秒";
+  if (sec<3600) return "约 "+Math.round(sec/60)+" 分钟";
+  return "约 "+(sec/3600).toFixed(1)+" 小时";
+}
+function esc(s){ return String(s??"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function taskName(t){
+  if (t.bittorrent && t.bittorrent.info && t.bittorrent.info.name) return t.bittorrent.info.name;
+  const f = (t.files||[])[0];
+  if (f && f.path) return f.path.split("/").pop();
+  if (f && f.uris && f.uris[0]) return f.uris[0].uri;
+  return "(解析中…)";
+}
+function taskFileHref(t){
+  const f = (t.files||[])[0];
+  if (!f || !f.path || !window.__dlDir) return null;
+  const rel = f.path.startsWith(window.__dlDir) ? f.path.slice(window.__dlDir.length).replace(/^\//,"") : null;
+  if (!rel) return null;
+  return "/files/" + rel.split("/").map(encodeURIComponent).join("/");
+}
+
+const STATUS = {active:"下载中", waiting:"等待", paused:"已暂停",
+                complete:"已完成", error:"出错", removed:"已删除"};
+const __prog = {};  // gid -> [completedLength, sinceTimestamp] for stall hints
+function stallHint(t, done, speed){
+  if (t.status !== "active") { delete __prog[t.gid]; return ""; }
+  const now = Date.now();
+  const rec = __prog[t.gid];
+  if (!rec || rec[0] !== done){ __prog[t.gid] = [done, now]; return ""; }
+  if (speed === 0 && now - rec[1] > 180000){
+    const mins = Math.floor((now - rec[1]) / 60000);
+    return `<span class="stall">速度为 0 已 ${mins} 分钟，可能卡住了，可试「暂停」再「继续」</span>`;
+  }
+  return "";
+}
+function render(tasks){
+  window.__tasks = tasks;
+  const list = $("#list");
+  $("#empty").style.display = tasks.length ? "none" : "block";
+  list.innerHTML = tasks.map(t=>{
+    const total = Number(t.totalLength)||0, done = Number(t.completedLength)||0;
+    const pct = total ? Math.min(100, done/total*100) : 0;
+    const speed = Number(t.downloadSpeed)||0;
+    const eta = speed>0 && total>done ? fmtEta((total-done)/speed) : "";
+    const cls = t.status==="complete" ? "done" : (t.status==="error" ? "error" : "");
+    let acts = "";
+    if (t.status==="active") acts += `<button onclick="rpc('pause',['${t.gid}']).then(refresh)">暂停</button>`;
+    if (t.status==="paused" || t.status==="waiting") acts += `<button onclick="rpc('unpause',['${t.gid}']).then(refresh)">继续</button>`;
+    if (t.status==="complete" || t.status==="error" || t.status==="removed")
+      acts += `<button onclick="rpc('removeDownloadResult',['${t.gid}']).then(refresh)">清除记录</button>`;
+    else
+      acts += `<button class="danger" onclick="if(confirm('删除这个任务？已下载的文件会保留在磁盘上。')) rpc('remove',['${t.gid}'],true).catch(()=>rpc('remove',['${t.gid}'])).then(refresh)">删除</button>`;
+    const href = t.status==="complete" ? taskFileHref(t) : null;
+    if (href) acts += `<a href="${esc(href)}"><button>取回文件</button></a>`;
+    const errMsg = t.errorMessage ? `<div class="meta" style="color:var(--err)">${esc(t.errorMessage)}</div>` : "";
+    return `<div class="task ${cls}"><div class="row"><div class="grow">
+      <div class="name">${esc(taskName(t))}</div>
+      <div class="meta">
+        <span class="chip ${esc(t.status)}">${STATUS[t.status]||esc(t.status)}</span>
+        <span>${fmtBytes(done)} / ${fmtBytes(total)}（${pct.toFixed(1)}%）</span>
+        ${t.status==="active" ? `<span>↓ ${fmtSpeed(speed)}</span><span>↑ ${fmtSpeed(t.uploadSpeed)}</span>` : ""}
+        ${eta ? `<span>${eta}</span>` : ""}
+        ${t.connections ? `<span>连接 ${t.connections}</span>` : ""}
+        ${t.numSeeders ? `<span>种子 ${t.numSeeders}</span>` : ""}
+        ${stallHint(t, done, speed)}
+      </div>${errMsg}
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      </div><div class="acts">${acts}</div></div></div>`;
+  }).join("");
+}
+
+async function refresh(){
+  try{
+    const st = await fetch("/api/state").then(r=>r.json());
+    if (st.login){ showLogin(); return; }
+    window.__dlDir = st.download_dir || "";
+    $("#dirHint").textContent = st.download_dir ? "下载目录：" + st.download_dir : "";
+    const ew = $("#engineWarn");
+    if (st.engine){ ew.style.display = "none"; }
+    else {
+      ew.style.display = "block";
+      ew.textContent = "⚠ 下载引擎（aria2）未启动，任务无法下载。" +
+        (st.engine_error ? "原因：" + st.engine_error : "正在等待引擎就绪…") +
+        "（可点右上角「诊断日志」导出日志排查）";
+    }
+    $("#logoutBtn").style.display = st.password ? "" : "none";
+    if (!st.engine) return;
+    const keys = ["gid","status","totalLength","completedLength","downloadSpeed","uploadSpeed",
+                  "connections","numSeeders","errorMessage","files","bittorrent"];
+    const [active, waiting, stopped, gstat] = await multicall([
+      ["tellActive", [keys]],
+      ["tellWaiting", [0, 100, keys]],
+      ["tellStopped", [0, 100, keys]],
+      ["getGlobalStat", []],
+    ]);
+    $("#gDown").textContent = fmtSpeed(gstat.downloadSpeed);
+    $("#gUp").textContent = fmtSpeed(gstat.uploadSpeed);
+    $("#gActive").textContent = gstat.numActive;
+    $("#gWaiting").textContent = gstat.numWaiting;
+    window.__anyActive = Number(gstat.numActive) > 0;
+    render([...(active||[]), ...(waiting||[]), ...(stopped||[])]);
+  }catch(e){ /* 下一轮再试 */ }
+}
+
+function normalizeUrl(u){
+  u = u.trim();
+  if (/^thunder:\/\//i.test(u)){  // 迅雷链接：base64 包着 AA<真实地址>ZZ
+    try{
+      let b = atob(u.slice(10).trim());
+      if (b.startsWith("AA")) b = b.slice(2);
+      if (b.endsWith("ZZ")) b = b.slice(0, -2);
+      if (b) return b;
+    }catch(e){ /* 解不开就原样提交 */ }
+  }
+  return u;
+}
+function knownUris(){
+  const s = new Set();
+  for (const t of (window.__tasks || []))
+    for (const f of (t.files || []))
+      for (const x of (f.uris || [])) s.add(x.uri);
+  return s;
+}
+function openAdd(){ $("#addUrls").value=""; $("#addTorrent").value=""; $("#addDir").value=""; addDlg.showModal(); }
+async function submitAdd(){
+  const dir = $("#addDir").value.trim();
+  const opts = dir ? {dir: (window.__dlDir||"") + "/" + dir} : {};
+  const file = $("#addTorrent").files[0];
+  try{
+    if (file){
+      const buf = await file.arrayBuffer();
+      let bin = ""; const bytes = new Uint8Array(buf);
+      for (let i=0;i<bytes.length;i+=0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i,i+0x8000));
+      await api("/api/torrent", {data: btoa(bin), dir});
+    }
+    let urls = $("#addUrls").value.split(/\r?\n/).map(normalizeUrl).filter(Boolean);
+    const known = knownUris();
+    const dupes = urls.filter(u => known.has(u));
+    if (dupes.length && !confirm("这些链接已在任务列表里：\n" + dupes.join("\n") + "\n\n点「确定」跳过它们、只加新的；点「取消」回到编辑。")){
+      return;
+    }
+    if (dupes.length) urls = urls.filter(u => !known.has(u));
+    for (const u of urls) await rpc("addUri", [[u], opts]);
+    addDlg.close(); refresh();
+  }catch(e){ alert("添加失败：" + e.message); }
+}
+
+async function openSettings(){
+  try{
+    const o = await rpc("getGlobalOption");
+    $("#setDown").value = Math.round((parseInt(o["max-overall-download-limit"])||0)/1024);
+    $("#setUp").value = Math.round((parseInt(o["max-overall-upload-limit"])||0)/1024);
+    $("#setConc").value = o["max-concurrent-downloads"] || 5;
+  }catch(e){}
+  setDlg.showModal();
+}
+async function submitSettings(){
+  const opts = {
+    "max-overall-download-limit": String(Math.max(0, +$("#setDown").value||0)*1024),
+    "max-overall-upload-limit": String(Math.max(0, +$("#setUp").value||0)*1024),
+    "max-concurrent-downloads": String(Math.min(20, Math.max(1, +$("#setConc").value||5))),
+  };
+  try{ await rpc("changeGlobalOption", [opts]); setDlg.close(); refresh(); }
+  catch(e){ alert("保存失败：" + e.message); }
+}
+
+function showLogin(){ $("#login").style.display = "flex"; $("#loginPw").focus(); }
+async function doLogin(){
+  const r = await fetch("/api/login", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({password: $("#loginPw").value})});
+  if (r.ok){ $("#login").style.display="none"; $("#loginErr").textContent=""; refresh(); }
+  else $("#loginErr").textContent = "密码不对";
+}
+async function doLogout(){ await api("/api/logout").catch(()=>{}); location.reload(); }
+$("#loginPw").addEventListener("keydown", e=>{ if (e.key==="Enter") doLogin(); });
+
+async function pollLoop(){
+  await refresh();
+  const delay = document.hidden ? 6000 : (window.__anyActive ? 1500 : 3000);
+  setTimeout(pollLoop, delay);
+}
+pollLoop();
+</script>
+</body>
+</html>

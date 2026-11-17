@@ -1,0 +1,20 @@
+services:
+  tofetch:
+    build: .
+    # or use a prebuilt image you pushed yourself:
+    # image: tofetch:latest
+    container_name: tofetch
+    restart: unless-stopped
+    ports:
+      - "8077:8077"
+      # BitTorrent listening port (TCP+UDP) - helps peer connectivity
+      - "51413:51413"
+      - "51413:51413/udp"
+    environment:
+      # CHANGE THIS before exposing the UI anywhere beyond your LAN
+      TOFETCH_PASSWORD: "change-me"
+      # TOFETCH_PORT: "8077"
+      # ARIA2_SECRET: ""   # empty = generated once and kept in /data
+    volumes:
+      - ./downloads:/downloads
+      - ./data:/data

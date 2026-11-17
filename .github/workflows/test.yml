@@ -1,0 +1,71 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never let runs stack up; a newer push supersedes the older run.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]  # 3.10 = woiden server, 3.13 = test sandbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Engine is fetched fresh each run (pinned version, same as shipped
+      # packages) — nothing is stored between runs.
+      - name: Fetch pinned Aria2 Next engine
+        run: |
+          mkdir -p tools
+          curl -fsSL -o tools/aria2c https://github.com/AnInsomniacy/aria2-next/releases/download/v3.1.0/aria2-next-3.1.0-linux-x86_64
+          chmod +x tools/aria2c
+          tools/aria2c --version | head -1
+
+      - name: Run regression suite (local sources only, no external traffic)
+        run: python3 tests/run_tests.py 2>&1 | tee suite.log
+
+      # Quota hygiene: artifacts only on failure, tiny text log, gone in 3 days.
+      - name: Upload suite log on failure only
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-log-py${{ matrix.python }}
+          path: suite.log
+          retention-days: 3
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Assemble the Windows package with the exact recipe of the shipped
+      # zip (portable Python + Aria2 Next .exe), then smoke-test it with
+      # the packaged python.exe itself.
+      - name: Assemble Windows package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkgwin | Out-Null
+          Copy-Item server.py, aria2.conf -Destination pkgwin
+          Copy-Item static -Destination pkgwin -Recurse
+          Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath pkgwin/python
+          Invoke-WebRequest -Uri https://github.com/AnInsomniacy/aria2-next/releases/download/v3.1.0/aria2-next-3.1.0-windows-x86_64.exe -OutFile pkgwin/aria2c.exe
+
+      - name: Run Windows smoke test
+        shell: pwsh
+        run: |
+          $env:TOFETCH_PKG_DIR = "pkgwin"
+          $env:PYTHONUTF8 = "1"
+          .\pkgwin\python\python.exe tests\run_smoke_windows.py
