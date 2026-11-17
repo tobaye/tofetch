@@ -37,6 +37,21 @@ Gopeed、AB Download Manager、FDM、IDM），按批次推进。原则不变：�
 - 轮询降频（后台/无活动任务时）；任务速度为 0 持续 3 分钟的卡住提示
 - Termux 启动时 wake-lock
 
+## 下一批·安全加固（2026-11-18 外部完整审计建议，Mi 已逐条核）
+- 审计结论存档：核心/CI/三包/logo/服务器版均通过；报告所称 compose 密码
+  「高危」不成立——文件中是带引号的占位符 "change-me"（11 字符是含引号
+  计数），实测登不上服务器；服务器 engine 字段已补验为 True
+- /api/login 限流或失败锁定（同 IP 连续失败 5 次锁 15 分钟，参照评论
+  网关口径）——【v1.0.1 已插队完成】down.puke.eu.org 已公网可达，此项
+  最优先；经代理时只信任回环来源的 CF-Connecting-IP / X-Forwarded-For
+- addUri / addTorrent 的 dir 参数钳制在下载目录内（与 /files/ 检查对齐）
+- _read_json 加请求体大小上限
+- 会话 cookie 按请求实际协议加 Secure（HTTPS/隧道场景；本地 http 形态
+  不能无条件加，否则本机登录丢 cookie）
+- 打包保留执行位：Linux tofetch.sh、安卓 install.sh 与引擎现为 0660，
+  打包时带 x 位，省掉解压后 chmod +x 一步（说明里的提示保留作兜底）
+- APK release 签名规划：换签名需卸载重装，提前定数据迁移说法
+
 ## 下一批·功能（易做、收益高）
 - 限速档位（可保存的几档配置）＋按时段自动切换限速
 - 定时启停（到点 pauseAll / unpauseAll）

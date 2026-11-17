@@ -14,6 +14,8 @@ flows that must never silently break:
   T7 crash right after add: task survives (add persists the session
      immediately; this gated the suite from the start as a
      known-gap soft check and was promoted once the fix landed).
+  T8 login throttle: 5 wrong passwords lock the client out; even the
+     right password gets 429 until the lock expires, then login works.
 
 Usage: python3 tests/run_tests.py
 Env:   TOFETCH_TEST_ARIA2=/path/to/aria2c   (default: tools/aria2c, else PATH)
@@ -114,7 +116,7 @@ class QuietServer(ThreadingHTTPServer):
 
 # ------------------------------------------------------------ tofetch client
 class ToFetch:
-    def __init__(self, work: Path, aria2: str, ui_port: int, rpc_port: int):
+    def __init__(self, work: Path, aria2: str, ui_port: int, rpc_port: int, extra_env=None):
         self.work = work
         self.ui = f"http://127.0.0.1:{ui_port}"
         env = dict(os.environ)
@@ -125,6 +127,8 @@ class ToFetch:
             "TOFETCH_DOWNLOAD_DIR": str(work / "downloads"),
             "TOFETCH_DATA_DIR": str(work / "data"),
         })
+        if extra_env:
+            env.update(extra_env)
         self.proc = subprocess.Popen(
             [sys.executable, str(ROOT / "server.py")],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -348,6 +352,46 @@ def main() -> int:
     finally:
         p1.stop()
         shutil.rmtree(work5, ignore_errors=True)
+
+    # T8 login throttle: repeated wrong passwords lock the client out;
+    # even the right password is refused (429) until the lock expires.
+    work8 = Path(tempfile.mkdtemp(prefix="tofetch-test8-"))
+    td8 = ToFetch(work8, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PASSWORD": "test-pw-8",
+        "TOFETCH_LOGIN_LOCK_SECONDS": "4",
+    })
+    try:
+        def login_code(pw):
+            req = urllib.request.Request(
+                td8.ui + "/api/login",
+                data=json.dumps({"password": pw}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+        up = False
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(td8.ui + "/api/state", timeout=3)
+            except urllib.error.HTTPError as e:
+                up = e.code == 401
+                if up:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        wrong = [login_code("nope") for _ in range(5)]
+        locked = login_code("test-pw-8")
+        time.sleep(4.5)
+        after = login_code("test-pw-8")
+        report("T8 login throttle: 5 failures lock, 429 while locked, recovers",
+               up and all(c == 401 for c in wrong) and locked == 429 and after == 200,
+               f"(wrong={wrong}, locked={locked}, after={after})")
+    finally:
+        td8.stop()
+        shutil.rmtree(work8, ignore_errors=True)
 
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],

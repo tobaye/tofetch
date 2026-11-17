@@ -17,6 +17,8 @@ Configuration (environment variables):
   TOFETCH_PORT          web UI port                (default 8077)
   TOFETCH_HOST          bind address               (default 0.0.0.0)
   TOFETCH_PASSWORD      web UI password; empty = no login (LAN only!)
+  TOFETCH_LOGIN_MAX_FAILS    failed logins per client before a lock (default 5)
+  TOFETCH_LOGIN_LOCK_SECONDS login lock duration in seconds (default 900)
   TOFETCH_DOWNLOAD_DIR  where files are downloaded (default ./downloads)
   TOFETCH_DATA_DIR      session/config state       (default ./data)
   ARIA2_BIN             path to aria2c             (default: find in PATH)
@@ -70,6 +72,9 @@ RPC_URL = f"http://127.0.0.1:{RPC_PORT}/jsonrpc"
 AUTOSTART = os.environ.get("ARIA2_AUTOSTART", "1") == "1"
 
 SESSIONS = set()  # live login tokens (in memory only)
+LOGIN_MAX_FAILS = int(_env("LOGIN_MAX_FAILS", "5"))
+LOGIN_LOCK_SECONDS = int(_env("LOGIN_LOCK_SECONDS", "900"))
+LOGIN_FAILS = {}  # client key -> (consecutive failures, locked-until epoch)
 ENGINE_ERROR = ""  # why the engine is not running, surfaced in /api/state
 
 
@@ -231,7 +236,7 @@ ALLOWED_METHODS = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.0"
+    server_version = "ToFetch/1.0.1"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
@@ -259,6 +264,18 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(n).decode())
         except Exception:
             return {}
+
+    def _client_key(self) -> str:
+        # Reverse proxies (cloudflared) connect from localhost and carry
+        # the real client in CF-Connecting-IP / X-Forwarded-For. Only trust
+        # those headers from a loopback peer; otherwise use the peer itself.
+        peer = self.client_address[0]
+        if peer in ("127.0.0.1", "::1"):
+            for hdr in ("CF-Connecting-IP", "X-Forwarded-For"):
+                v = self.headers.get(hdr)
+                if v:
+                    return v.split(",")[0].strip()
+        return peer
 
     def _authed(self) -> bool:
         if not PASSWORD:
@@ -314,12 +331,26 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if not PASSWORD:
                 return self._json(200, {"ok": True})
+            key = self._client_key()
+            now = time.time()
+            fails, locked_until = LOGIN_FAILS.get(key, (0, 0.0))
+            if locked_until > now:
+                mins = max(1, int((locked_until - now) // 60) + 1)
+                return self._json(HTTPStatus.TOO_MANY_REQUESTS,
+                                  {"error": f"登录失败次数过多，已锁定，请约 {mins} 分钟后再试"})
             if hmac.compare_digest(str(body.get("password", "")), PASSWORD):
+                LOGIN_FAILS.pop(key, None)
                 token = secrets.token_hex(24)
                 SESSIONS.add(token)
                 return self._json(200, {"ok": True}, extra={
                     "Set-Cookie": f"tofetch_session={token}; Path=/; HttpOnly; SameSite=Lax",
                 })
+            fails += 1
+            if fails >= LOGIN_MAX_FAILS:
+                LOGIN_FAILS[key] = (0, now + LOGIN_LOCK_SECONDS)
+                log_event(f"login locked for {key}: {LOGIN_MAX_FAILS} failed attempts")
+            else:
+                LOGIN_FAILS[key] = (fails, 0.0)
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "wrong password"})
         if path == "/api/logout":
             cookie = SimpleCookie(self.headers.get("Cookie") or "")
