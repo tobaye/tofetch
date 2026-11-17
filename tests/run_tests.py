@@ -12,7 +12,7 @@ flows that must never silently break:
   T5 second instance on the same port exits politely (no traceback)
   T6 diagnostics log endpoint returns content
   T7 crash right after add: task survives (add persists the session
-     immediately since v1.2; this gated the suite from the start as a
+     immediately; this gated the suite from the start as a
      known-gap soft check and was promoted once the fix landed).
 
 Usage: python3 tests/run_tests.py
