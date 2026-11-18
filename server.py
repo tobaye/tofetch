@@ -181,6 +181,11 @@ def start_aria2() -> None:
         "--continue=true",
         "--daemon=false",
     ]
+    # Optional CA bundle override (Android: the engine has no system CA
+    # store to read, so the app ships one and points aria2 at it).
+    ca_bundle = os.environ.get("ARIA2_CA_CERTIFICATE")
+    if ca_bundle and Path(ca_bundle).exists():
+        args.append(f"--ca-certificate={ca_bundle}")
     aria2_log = DATA_DIR / "aria2.log"
     try:
         logf = aria2_log.open("ab")

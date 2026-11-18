@@ -28,6 +28,26 @@ def start(files_dir, data_dir, download_dir, aria2_bin):
     sys.argv = ["server"]
     signal.signal = lambda *a, **k: None  # noqa: E731 - see module docstring
 
+    # Android gives the engine no readable system CA store, so ship the
+    # Mozilla bundle (cacert.pem next to server.py) and hand its real path
+    # to server.py, which passes it to aria2 as --ca-certificate.
+    ca_data = None
+    try:
+        import pkgutil
+
+        ca_data = pkgutil.get_data("server", "cacert.pem")
+    except Exception:
+        ca_data = None
+    if not ca_data:
+        try:
+            ca_data = (Path(__file__).parent / "cacert.pem").read_bytes()
+        except OSError:
+            ca_data = None
+    if ca_data:
+        ca_path = Path(data_dir) / "cacert.pem"
+        ca_path.write_bytes(ca_data)
+        os.environ["ARIA2_CA_CERTIFICATE"] = str(ca_path)
+
     notes = []
     try:
         import server
