@@ -281,8 +281,11 @@ function normalizeUrl(u){
 }
 // 从任意一段文本里提取下载链接：http/https/ftp 直链、磁力、ed2k、迅雷。
 // 按出现顺序返回，顺手去掉链接尾部粘连的标点（如中文句号、括号）。
+// 直链/磁力只认 ASCII：链接后面紧贴的中文一定是正文，不切就会把
+// 「…apk所有信息」整段吞进去（2026-11-18 真机实测）；ed2k 的文件名可以是
+// 中文，它有明确的 |/ 结尾，按结尾切。
 function extractLinks(text){
-  const re = /(magnet:\?[^\s<>"'，。；、）】」]+|ed2k:\/\/[^\s<>"']+|thunder:\/\/[A-Za-z0-9+/=]+|(?:https?|ftp):\/\/[^\s<>"'，。；、）】」]+)/gi;
+  const re = /(ed2k:\/\/\|file\|[^\s<>"']+?\|\/|magnet:\?[^\s<>"'\u0080-\uffff]+|ed2k:\/\/[^\s<>"'\u0080-\uffff]+|thunder:\/\/[A-Za-z0-9+/=]+|(?:https?|ftp):\/\/[^\s<>"'\u0080-\uffff]+)/gi;
   const out = [], seen = new Set();
   for (const m of String(text||"").matchAll(re)){
     let u = m[0].replace(/[.,;:!?，。；：、）)】\]>"']+$/, "");
