@@ -104,8 +104,9 @@
 
 <dialog id="addDlg">
   <h3>添加任务</h3>
-  <label>链接（每行一个，支持 http / https / ftp / 磁力链）</label>
-  <textarea id="addUrls" placeholder="https://example.com/file.zip&#10;magnet:?xt=urn:btih:..."></textarea>
+  <label>链接（每行一个；也可以把整段文字粘进来，会自动提取其中的下载链接）</label>
+  <textarea id="addUrls" placeholder="https://example.com/file.zip&#10;magnet:?xt=urn:btih:...&#10;也可以直接粘贴一整段文字，自动提取里面的链接"></textarea>
+  <p class="hint" id="addHint"></p>
   <label>或选择种子文件（.torrent）</label>
   <input type="file" id="addTorrent" accept=".torrent">
   <label>保存到子目录（可空，相对于下载目录）</label>
@@ -278,6 +279,20 @@ function normalizeUrl(u){
   }
   return u;
 }
+// 从任意一段文本里提取下载链接：http/https/ftp 直链、磁力、ed2k、迅雷。
+// 按出现顺序返回，顺手去掉链接尾部粘连的标点（如中文句号、括号）。
+function extractLinks(text){
+  const re = /(magnet:\?[^\s<>"'，。；、）】」]+|ed2k:\/\/[^\s<>"']+|thunder:\/\/[A-Za-z0-9+/=]+|(?:https?|ftp):\/\/[^\s<>"'，。；、）】」]+)/gi;
+  const out = [], seen = new Set();
+  for (const m of String(text||"").matchAll(re)){
+    let u = m[0].replace(/[.,;:!?，。；：、）)】\]>"']+$/, "");
+    if (!u) continue;
+    const key = normalizeUrl(u);
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(u);
+  }
+  return out;
+}
 function knownUris(){
   const s = new Set();
   for (const t of (window.__tasks || []))
@@ -285,7 +300,20 @@ function knownUris(){
       for (const x of (f.uris || [])) s.add(x.uri);
   return s;
 }
-function openAdd(){ $("#addUrls").value=""; $("#addTorrent").value=""; $("#addDir").value=""; addDlg.showModal(); }
+function openAdd(){ $("#addUrls").value=""; $("#addTorrent").value=""; $("#addDir").value=""; $("#addHint").textContent=""; addDlg.showModal(); }
+// 粘贴时就提取：把整段文字换成识别出的链接清单，省得用户自己挑。
+$("#addUrls").addEventListener("paste", ()=>{
+  setTimeout(()=>{
+    const ta = $("#addUrls");
+    const links = extractLinks(ta.value);
+    if (links.length && links.join("\n") !== ta.value.trim()){
+      ta.value = links.join("\n");
+      $("#addHint").textContent = "已从粘贴内容中识别出 " + links.length + " 条下载链接";
+    } else if (links.length){
+      $("#addHint").textContent = "识别出 " + links.length + " 条下载链接";
+    }
+  }, 0);
+});
 async function submitAdd(){
   const dir = $("#addDir").value.trim();
   const opts = dir ? {dir: (window.__dlDir||"") + "/" + dir} : {};
@@ -297,7 +325,11 @@ async function submitAdd(){
       for (let i=0;i<bytes.length;i+=0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i,i+0x8000));
       await api("/api/torrent", {data: btoa(bin), dir});
     }
-    let urls = $("#addUrls").value.split(/\r?\n/).map(normalizeUrl).filter(Boolean);
+    // 先从整段内容提取链接（粘了整段文字也能用）；提不到才按行拆。
+    const raw = $("#addUrls").value;
+    const found = extractLinks(raw);
+    let urls = (found.length ? found : raw.split(/\r?\n/)).map(normalizeUrl).filter(Boolean);
+    urls = [...new Set(urls)];
     const known = knownUris();
     const dupes = urls.filter(u => known.has(u));
     if (dupes.length && !confirm("这些链接已在任务列表里：\n" + dupes.join("\n") + "\n\n点「确定」跳过它们、只加新的；点「取消」回到编辑。")){
