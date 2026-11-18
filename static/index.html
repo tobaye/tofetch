@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ToFetch 下载管理</title>
-<script>try{ if (localStorage.getItem("tf-theme")==="light") document.documentElement.dataset.theme="light"; }catch(e){}</script>
+<script>try{
+  if (localStorage.getItem("tf-theme")==="light") document.documentElement.dataset.theme="light";
+  var __acc = JSON.parse(localStorage.getItem("tf-accent") || "null");
+  if (__acc && __acc.a){ document.documentElement.style.setProperty("--accent", __acc.a); document.documentElement.style.setProperty("--accent2", __acc.a2 || __acc.a); }
+  if (localStorage.getItem("tf-density")==="compact") document.documentElement.classList.add("compact");
+}catch(e){}</script>
 <style>
   :root{
     --bg:#0f1419; --panel:#1a222c; --panel2:#212c38; --line:#2c3947;
@@ -85,6 +90,13 @@
   .hist-row .n{font-weight:600;word-break:break-all}
   .file-row{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
   .file-row input{margin-top:3px}
+  .set-nav{display:flex;flex-direction:column;gap:8px}
+  .set-nav button{text-align:left;padding:11px 14px;font-size:14px}
+  html.compact .task{padding:8px 11px;margin-bottom:6px}
+  html.compact .bar{margin-top:5px}
+  html.compact .task .meta{gap:8px}
+  .swatch{width:30px;height:30px;border-radius:99px;padding:0;border:2px solid var(--line);cursor:pointer}
+  .swatch.on{border-color:var(--text)}
 </style>
 </head>
 <body>
@@ -195,62 +207,115 @@
 </dialog>
 
 <dialog id="setDlg">
-  <h3>设置</h3>
-  <label>最大下载速度（KB/s，0 = 不限）</label>
-  <input type="number" id="setDown" min="0">
-  <label>最大上传速度（KB/s，0 = 不限）</label>
-  <input type="number" id="setUp" min="0">
-  <label>同时下载任务数</label>
-  <input type="number" id="setConc" min="1" max="50">
-  <label>每任务连接数（1–64，留空用引擎默认）</label>
-  <input type="number" id="setConn" min="1" max="64">
-  <label>分片数（1–64，留空用引擎默认）</label>
-  <input type="number" id="setSplit" min="1" max="64">
-  <label>代理（留空不用；如 http://127.0.0.1:7890）</label>
-  <input type="text" id="setProxy" placeholder="http://host:port">
-  <label>BT Tracker（逗号分隔，留空用引擎默认）</label>
-  <textarea id="setTrackers" style="min-height:56px" placeholder="udp://tracker.example:1337/announce,..."></textarea>
-  <label>做种比率（上传量达到下载量的该倍数后停止做种，留空用引擎默认）</label>
-  <input type="text" id="setSeedRatio" placeholder="如 1.0">
-  <label>做种时间（分钟，留空用引擎默认）</label>
-  <input type="number" id="setSeedTime" min="0">
-  <label>失败自动重试次数（0 = 不重试）</label>
-  <input type="number" id="setTries" min="0" max="100">
-  <label>重试间隔（秒）</label>
-  <input type="number" id="setRetryWait" min="0" max="3600">
-  <h4 style="margin:14px 0 8px">定时</h4>
-  <label>限速时段开始（与结束都填才生效）</label>
-  <input type="time" id="schFrom">
-  <label>限速时段结束（可跨午夜）</label>
-  <input type="time" id="schTo">
-  <label>时段内下载限速（KB/s，0 = 不限）</label>
-  <input type="number" id="schDown" min="0">
-  <label>时段内上传限速（KB/s，0 = 不限）</label>
-  <input type="number" id="schUp" min="0">
-  <label>每日定时暂停全部（留空关闭）</label>
-  <input type="time" id="schPause">
-  <label>每日定时恢复全部（留空关闭）</label>
-  <input type="time" id="schResume">
-  <label>Tracker 列表更新地址（留空关闭，从该地址拉取最新 Tracker 覆盖上面的设置）</label>
-  <input type="text" id="schTrackerUrl" placeholder="https://.../trackers.txt">
-  <label>Tracker 更新间隔（小时）</label>
-  <input type="number" id="schTrackerHours" min="1" max="168">
-  <h4 style="margin:14px 0 8px">其他</h4>
-  <label>Webhook（任务完成/失败时把结果 POST 到这个地址，留空关闭）</label>
-  <input type="text" id="prefWebhook" placeholder="https://...">
-  <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
-    <input type="checkbox" id="prefCat" style="width:auto;margin:0"> 按扩展名自动分类到子目录（视频 / 音乐 / 文档 / 压缩包…）
-  </label>
-  <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
-    <input type="checkbox" id="prefNotify" style="width:auto;margin:0"> 下载完成时弹浏览器通知
-  </label>
-  <label>任务备份（换机 / 重装时迁移未完成任务）</label>
-  <div style="display:flex;gap:8px">
-    <button onclick="exportTasks()">导出任务</button>
-    <button onclick="$('#importFile').click()">导入任务</button>
-    <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importTasks(event)">
+  <h3 id="setTitle">设置</h3>
+  <div id="setHome">
+    <div class="set-nav">
+      <button onclick="showSetGroup('download')">下载与限速 ›</button>
+      <button onclick="showSetGroup('task')">任务默认 ›</button>
+      <button onclick="showSetGroup('schedule')">定时计划 ›</button>
+      <button onclick="showSetGroup('notify')">通知与分类 ›</button>
+      <button onclick="showSetGroup('backup')">任务备份 ›</button>
+      <button onclick="showSetGroup('appearance')">外观 ›</button>
+    </div>
+    <p class="hint" id="statsLine" style="margin-top:12px"></p>
+    <p class="hint">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
   </div>
-  <p class="hint">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
+  <div id="setPage" style="display:none">
+    <button onclick="showSetHome()" style="margin-bottom:12px">← 返回</button>
+    <div class="set-group" data-group="download">
+      <label>最大下载速度（KB/s，0 = 不限）</label>
+      <input type="number" id="setDown" min="0">
+      <label>最大上传速度（KB/s，0 = 不限）</label>
+      <input type="number" id="setUp" min="0">
+      <label>同时下载任务数</label>
+      <input type="number" id="setConc" min="1" max="50">
+      <label>每任务连接数（1–64，留空用引擎默认）</label>
+      <input type="number" id="setConn" min="1" max="64">
+      <label>分片数（1–64，留空用引擎默认）</label>
+      <input type="number" id="setSplit" min="1" max="64">
+      <label>代理（留空不用；如 http://127.0.0.1:7890）</label>
+      <input type="text" id="setProxy" placeholder="http://host:port">
+      <label>BT Tracker（逗号分隔，留空用引擎默认）</label>
+      <textarea id="setTrackers" style="min-height:56px" placeholder="udp://tracker.example:1337/announce,..."></textarea>
+      <label>做种比率（上传量达到下载量的该倍数后停止做种，留空用引擎默认）</label>
+      <input type="text" id="setSeedRatio" placeholder="如 1.0">
+      <label>做种时间（分钟，留空用引擎默认）</label>
+      <input type="number" id="setSeedTime" min="0">
+    </div>
+    <div class="set-group" data-group="task">
+      <label>失败自动重试次数（0 = 不重试）</label>
+      <input type="number" id="setTries" min="0" max="100">
+      <label>重试间隔（秒）</label>
+      <input type="number" id="setRetryWait" min="0" max="3600">
+    </div>
+    <div class="set-group" data-group="schedule">
+      <label>限速时段开始（与结束都填才生效）</label>
+      <input type="time" id="schFrom">
+      <label>限速时段结束（可跨午夜）</label>
+      <input type="time" id="schTo">
+      <label>时段内下载限速（KB/s，0 = 不限）</label>
+      <input type="number" id="schDown" min="0">
+      <label>时段内上传限速（KB/s，0 = 不限）</label>
+      <input type="number" id="schUp" min="0">
+      <label>每日定时暂停全部（留空关闭）</label>
+      <input type="time" id="schPause">
+      <label>每日定时恢复全部（留空关闭）</label>
+      <input type="time" id="schResume">
+      <label>Tracker 列表更新地址（留空关闭，从该地址拉取最新 Tracker 覆盖上面的设置）</label>
+      <input type="text" id="schTrackerUrl" placeholder="https://.../trackers.txt">
+      <label>Tracker 更新间隔（小时）</label>
+      <input type="number" id="schTrackerHours" min="1" max="168">
+    </div>
+    <div class="set-group" data-group="notify">
+      <label>Webhook（任务完成/失败时把结果 POST 到这个地址，留空关闭）</label>
+      <input type="text" id="prefWebhook" placeholder="https://...">
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefCat" style="width:auto;margin:0"> 按扩展名自动分类到子目录（视频 / 音乐 / 文档 / 压缩包…）
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefNotify" style="width:auto;margin:0"> 下载完成时弹浏览器通知
+      </label>
+      <h4 style="margin:14px 0 8px">安卓策略（仅安卓版生效）</h4>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefWifiOnly" style="width:auto;margin:0"> 仅 WiFi 时下载（切到移动网络自动暂停，回到 WiFi 自动恢复）
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefSeedCharging" style="width:auto;margin:0"> 仅充电时做种（未充电时暂停已完成的 BT 任务）
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefLowBatt" style="width:auto;margin:0"> 低电量自动暂停（电量低于 20% 且未充电时）
+      </label>
+    </div>
+    <div class="set-group" data-group="backup">
+      <label>任务备份（换机 / 重装时迁移未完成任务）</label>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button onclick="exportTasks()">导出任务</button>
+        <button onclick="$('#importFile').click()">导入任务</button>
+        <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importTasks(event)">
+      </div>
+      <label>设置备份（导出 / 导入全部设置）</label>
+      <div style="display:flex;gap:8px">
+        <button onclick="exportSettings()">导出设置</button>
+        <button onclick="$('#importSettingsFile').click()">导入设置</button>
+        <input type="file" id="importSettingsFile" accept=".json,application/json" style="display:none" onchange="importSettings(event)">
+      </div>
+    </div>
+    <div class="set-group" data-group="appearance">
+      <label>主题色</label>
+      <div style="display:flex;gap:10px;margin-bottom:14px">
+        <button class="swatch" data-accent="gold" style="background:#d4a017" onclick="setAccent('gold')" title="金"></button>
+        <button class="swatch" data-accent="blue" style="background:#4c9aff" onclick="setAccent('blue')" title="蓝"></button>
+        <button class="swatch" data-accent="green" style="background:#3fb950" onclick="setAccent('green')" title="绿"></button>
+        <button class="swatch" data-accent="purple" style="background:#a371f7" onclick="setAccent('purple')" title="紫"></button>
+        <button class="swatch" data-accent="red" style="background:#f85149" onclick="setAccent('red')" title="红"></button>
+        <button class="swatch" data-accent="cyan" style="background:#39c5cf" onclick="setAccent('cyan')" title="青"></button>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="appDensity" style="width:auto;margin:0" onchange="setDensity(this.checked)"> 紧凑列表（任务卡片更密）
+      </label>
+      <p class="hint">外观设置只保存在本机浏览器，立即生效，不用点保存。</p>
+    </div>
+  </div>
   <div class="dlg-btns">
     <button onclick="setDlg.close()">取消</button>
     <button class="primary" onclick="submitSettings()">保存</button>
@@ -428,6 +493,11 @@ function render(tasks){
     let acts = "";
     if (t.status==="active") acts += `<button onclick="rpc('pause',['${t.gid}']).then(refresh)">暂停</button>`;
     if (t.status==="paused" || t.status==="waiting") acts += `<button onclick="rpc('unpause',['${t.gid}']).then(refresh)">继续</button>`;
+    if (t.status==="waiting" || t.status==="paused"){
+      acts += `<button onclick="queueMove('${t.gid}',0,'POS_SET')">置顶</button>`;
+      acts += `<button onclick="queueMove('${t.gid}',-1,'POS_CUR')">↑</button>`;
+      acts += `<button onclick="queueMove('${t.gid}',1,'POS_CUR')">↓</button>`;
+    }
     if (t.status==="error"){
       acts += `<button onclick="retryTask('${t.gid}')">重试</button>`;
       acts += `<button onclick="retryTaskNewLink('${t.gid}')">换链接重试</button>`;
@@ -771,6 +841,11 @@ function taskUri(t){
   const f = (t.files || [])[0];
   return f && f.uris && f.uris[0] ? f.uris[0].uri : "";
 }
+async function queueMove(gid, pos, how){
+  try{ await rpc("changePosition", [gid, pos, how]); }
+  catch(e){ alert("调整队列失败：" + e.message); }
+  refresh();
+}
 async function retryTask(gid){
   const t = findTask(gid); if (!t) return;
   const uri = taskUri(t);
@@ -1014,6 +1089,16 @@ async function submitAdd(){
     const found = extractLinks(raw);
     let urls = (found.length ? found : raw.split(/\r?\n/)).map(normalizeUrl).filter(Boolean);
     urls = [...new Set(urls.flatMap(expandWildcard))];
+    const driveHits = urls.filter(u => DRIVES.some(d => d.re.test(u)));
+    if (driveHits.length && driveHits.length === urls.length){
+      if (!confirm("这些全是网盘分享链接。网盘内的文件必须在网盘页里打开 / 转存，ToFetch 直下只会得到一张网页（.html）。\n\n点「取消」不添加（推荐）；点「确定」仍要添加。")) return;
+    } else if (driveHits.length){
+      if (confirm("包含 " + driveHits.length + " 条网盘分享链接（ToFetch 无法直下网盘文件）。\n\n点「确定」只添加其余 " + (urls.length - driveHits.length) + " 条链接；点「取消」再选择。")){
+        urls = urls.filter(u => !driveHits.includes(u));
+      } else if (!confirm("点「确定」全部添加（含网盘链接，只会下到网页）；点「取消」放弃本次添加。")){
+        return;
+      }
+    }
     window.__backups = collectBackups();
     const known = knownUris();
     const dupes = urls.filter(u => known.has(u));
@@ -1035,6 +1120,51 @@ async function submitAdd(){
   }catch(e){ alert("添加失败：" + e.message); }
 }
 
+function showSetGroup(name){
+  $("#setHome").style.display = "none";
+  $("#setPage").style.display = "";
+  document.querySelectorAll(".set-group").forEach(g => { g.style.display = g.dataset.group === name ? "" : "none"; });
+  const titles = {download: "下载与限速", task: "任务默认", schedule: "定时计划", notify: "通知与分类", backup: "任务备份", appearance: "外观"};
+  $("#setTitle").textContent = titles[name] || "设置";
+}
+function showSetHome(){
+  $("#setPage").style.display = "none";
+  $("#setHome").style.display = "";
+  $("#setTitle").textContent = "设置";
+}
+const ACCENTS = {
+  gold: ["#d4a017", "#b8860b"], blue: ["#4c9aff", "#2f6fd0"],
+  green: ["#3fb950", "#2ea043"], purple: ["#a371f7", "#8957e5"],
+  red: ["#f85149", "#da3633"], cyan: ["#39c5cf", "#1f9aa3"]
+};
+function setAccent(key){
+  const a = ACCENTS[key]; if (!a) return;
+  document.documentElement.style.setProperty("--accent", a[0]);
+  document.documentElement.style.setProperty("--accent2", a[1]);
+  try{ localStorage.setItem("tf-accent", JSON.stringify({k: key, a: a[0], a2: a[1]})); }catch(e){}
+  document.querySelectorAll(".swatch").forEach(b => b.classList.toggle("on", b.dataset.accent === key));
+}
+function setDensity(compact){
+  document.documentElement.classList.toggle("compact", !!compact);
+  try{ localStorage.setItem("tf-density", compact ? "compact" : ""); }catch(e){}
+}
+function exportSettings(){
+  const a = document.createElement("a");
+  a.href = "/api/settings/export";
+  a.download = "tofetch-settings.json";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function importSettings(ev){
+  const f = ev.target.files[0];
+  if (!f) return;
+  try{
+    const data = JSON.parse(await f.text());
+    await api("/api/settings/import", data);
+    alert("设置导入完成");
+    openSettings();
+  }catch(e){ alert("导入设置失败：" + e.message); }
+  ev.target.value = "";
+}
 async function openSettings(){
   try{
     const s = await getApi("/api/settings");
@@ -1066,8 +1196,21 @@ async function openSettings(){
     $("#prefWebhook").value = pf.webhook_url || "";
     $("#prefCat").checked = !!pf.category_auto;
     $("#prefNotify").checked = !!pf.notify_done;
+    $("#prefWifiOnly").checked = !!pf.wifi_only;
+    $("#prefSeedCharging").checked = !!pf.seed_charging;
+    $("#prefLowBatt").checked = !!pf.low_batt_pause;
   }catch(e){}
-  setDlg.showModal();
+  $("#appDensity").checked = document.documentElement.classList.contains("compact");
+  try{
+    const acc = JSON.parse(localStorage.getItem("tf-accent") || "null");
+    document.querySelectorAll(".swatch").forEach(b => b.classList.toggle("on", b.dataset.accent === ((acc && acc.k) || "gold")));
+  }catch(e){}
+  showSetHome();
+  getApi("/api/stats").then(s => {
+    $("#statsLine").textContent = "累计完成 " + (s.total_tasks || 0) + " 个任务 · 共 " +
+      fmtBytes(s.total_bytes || 0) + " · 今日 " + fmtBytes(s.today || 0);
+  }).catch(()=>{ $("#statsLine").textContent = ""; });
+  if (!setDlg.open) setDlg.showModal();
 }
 async function submitSettings(){
   const numOr = id => { const v = $(id).value.trim(); return v === "" ? "" : String(Math.max(0, parseInt(v)||0)); };
@@ -1097,6 +1240,9 @@ async function submitSettings(){
     webhook_url: $("#prefWebhook").value.trim(),
     category_auto: $("#prefCat").checked,
     notify_done: $("#prefNotify").checked,
+    wifi_only: $("#prefWifiOnly").checked,
+    seed_charging: $("#prefSeedCharging").checked,
+    low_batt_pause: $("#prefLowBatt").checked,
   };
   try{
     await api("/api/settings", {global, task, schedule, prefs});

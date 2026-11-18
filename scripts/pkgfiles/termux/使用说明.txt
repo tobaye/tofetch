@@ -1,0 +1,40 @@
+﻿ToFetch 安卓版（Termux）使用说明
+================================
+
+【原理】在手机上装 Termux（一个免费的终端 App），
+ToFetch 就在手机本地运行，浏览器打开操作，
+跟电脑版一模一样，免密码。
+
+【安装，只需一次】
+1. 安装 Termux：请从 F-Droid 或 GitHub 搜索下载 Termux，
+   不要用安卓应用商店里的老版本。
+2. 把 ToFetch-Android.zip 解压到手机的「Download」文件夹。
+3. 打开 Termux，输入下面两行：
+   termux-setup-storage
+   （弹窗点允许，这是让下载文件能存到手机相册旁边的 Download 文件夹）
+   cd ~/storage/downloads/ToFetch-Android
+   bash install.sh
+   安装过程会自动下载 Python（约几十 MB），等它跑完。
+
+【使用】
+以后打开 Termux 输入：tofetch
+浏览器会自动打开下载器页面（或手动打开 http://localhost:8077）。
+粘贴链接/磁力链即可下载，文件存在手机 Download/ToFetch 里。
+
+【停止】在 Termux 里按音量减+C，或直接划掉 Termux。
+任务进度自动保存，下次启动接着下。
+
+【注意】
+- 下载时尽量别让系统把 Termux 杀后台：把 Termux 加入
+  电池优化白名单会更稳。
+- 没做 termux-setup-storage 授权时，文件会存在 Termux
+  内部（tofetch/downloads），也能在页面里点开取回，
+  只是文件管理器看不到。
+
+【已知限制】如果程序被强行杀掉（断电、系统杀后台），
+已下载进度可能回退一段（引擎按自己的节奏存进度点），
+任务本身不会丢、文件最终是对的，只是要多重下一截。
+正常用 Ctrl+C / 关闭窗口退出则没有这个问题。
+
+另：全局限速这类全局选项重启后不会保留（任务本身会恢复），
+重启后需要的话在界面里重新设一下即可。

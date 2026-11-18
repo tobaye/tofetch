@@ -1,8 +1,8 @@
 services:
   tofetch:
     build: .
-    # or use a prebuilt image you pushed yourself:
-    # image: tofetch:latest
+    # or use the published image:
+    # image: ghcr.io/tobaye/tofetch:latest
     container_name: tofetch
     restart: unless-stopped
     ports:

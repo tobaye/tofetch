@@ -6,7 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -25,6 +29,12 @@ class ToFetchService : Service() {
     private lateinit var openIntent: PendingIntent
     private lateinit var stopIntent: PendingIntent
     private lateinit var pauseIntent: PendingIntent
+    private lateinit var addIntent: PendingIntent
+
+    // Gids this service paused for a download policy (wifi_only /
+    // low_batt_pause / seed_charging). Only these are ever resumed by
+    // the policy engine, so a user's own manual pauses are never undone.
+    private val policyPaused = mutableSetOf<String>()
 
     @Volatile
     private var polling = false
@@ -55,6 +65,11 @@ class ToFetchService : Service() {
             )
             pauseIntent = PendingIntent.getService(
                 this, 2, Intent(this, ToFetchService::class.java).setAction(ACTION_PAUSE_ALL),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            addIntent = PendingIntent.getActivity(
+                this, 3, Intent(this, MainActivity::class.java)
+                    .putExtra(MainActivity.EXTRA_ADD_CLIPBOARD, true),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             if (Build.VERSION.SDK_INT >= 34) {
@@ -105,6 +120,7 @@ class ToFetchService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentIntent(openIntent)
+            .addAction(0, "添加下载", addIntent)
             .addAction(0, "全部暂停", pauseIntent)
             .addAction(0, "停止服务", stopIntent)
             .build()
@@ -130,6 +146,7 @@ class ToFetchService : Service() {
                         }
                         nm.notify(1, buildStatusNotification(text))
                         checkCompletions()
+                        applyPolicies()
                     }
                 } catch (e: Exception) {
                 }
@@ -139,6 +156,108 @@ class ToFetchService : Service() {
                     break
                 }
             }
+        }
+    }
+
+    // ---- download policies (prefs in /api/settings) ------------------
+    // wifi_only: on cellular, pause active downloads; back on WiFi,
+    // resume exactly the ones we paused. low_batt_pause: same pausing
+    // while battery < 20% and not charging. seed_charging: pause
+    // completed (seeding) BT tasks while not charging.
+    private fun applyPolicies() {
+        try {
+            val prefs = fetchSettings()?.optJSONObject("prefs") ?: return
+            val wifiOnly = prefs.optBoolean("wifi_only")
+            val seedCharging = prefs.optBoolean("seed_charging")
+            val lowBatt = prefs.optBoolean("low_batt_pause")
+            if (!wifiOnly && !seedCharging && !lowBatt && policyPaused.isEmpty()) return
+
+            var wifiBad = false
+            if (wifiOnly) {
+                val cm = getSystemService(ConnectivityManager::class.java)
+                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                if (caps != null) {
+                    val good = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    val cell = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    wifiBad = cell && !good
+                }
+            }
+            val bi = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = bi?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = bi?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+            val pct = if (level >= 0 && scale > 0) level * 100 / scale else 100
+            val bstat = bi?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val charging = bstat == BatteryManager.BATTERY_STATUS_CHARGING ||
+                bstat == BatteryManager.BATTERY_STATUS_FULL
+            val battBad = lowBatt && pct < 20 && !charging
+            val seedBad = seedCharging && !charging
+
+            val keys = JSONArray().put("gid").put("status")
+                .put("completedLength").put("totalLength")
+            val active = rpc("tellActive", JSONArray().put(keys)) as? JSONArray ?: return
+            val downloading = mutableSetOf<String>()
+            val seeding = mutableSetOf<String>()
+            for (i in 0 until active.length()) {
+                val t = active.optJSONObject(i) ?: continue
+                val gid = t.optString("gid")
+                if (gid.isEmpty()) continue
+                val total = t.optLong("totalLength")
+                val done = t.optLong("completedLength")
+                if (total > 0 && done >= total) seeding.add(gid) else downloading.add(gid)
+            }
+            val want = mutableSetOf<String>()
+            if (wifiBad || battBad) want.addAll(downloading)
+            if (seedBad) want.addAll(seeding)
+            for (gid in want) {
+                if (gid !in policyPaused) {
+                    try {
+                        rpc("pause", JSONArray().put(gid))
+                        policyPaused.add(gid)
+                        Diag.log(this, "policy pause $gid (wifiBad=$wifiBad battBad=$battBad seedBad=$seedBad)")
+                    } catch (e: Exception) {
+                    }
+                }
+            }
+            if (policyPaused.isNotEmpty()) {
+                val waiting = rpc("tellWaiting", JSONArray().put(0).put(200).put(keys)) as? JSONArray
+                val pausedNow = mutableSetOf<String>()
+                if (waiting != null) {
+                    for (i in 0 until waiting.length()) {
+                        val t = waiting.optJSONObject(i) ?: continue
+                        if (t.optString("status") == "paused") pausedNow.add(t.optString("gid"))
+                    }
+                }
+                val iter = policyPaused.iterator()
+                while (iter.hasNext()) {
+                    val gid = iter.next()
+                    if (gid !in want) {
+                        if (gid in pausedNow) {
+                            try {
+                                rpc("unpause", JSONArray().put(gid))
+                                Diag.log(this, "policy resume $gid")
+                            } catch (e: Exception) {
+                            }
+                        }
+                        iter.remove()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // policies are best-effort; never disturb the status loop
+        }
+    }
+
+    private fun fetchSettings(): JSONObject? {
+        return try {
+            val c = URL("http://127.0.0.1:8077/api/settings").openConnection() as HttpURLConnection
+            c.connectTimeout = 2000
+            c.readTimeout = 2000
+            val text = c.inputStream.bufferedReader().readText()
+            c.disconnect()
+            JSONObject(text)
+        } catch (e: Exception) {
+            null
         }
     }
 

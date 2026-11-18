@@ -75,6 +75,33 @@ RPC_URL = f"http://127.0.0.1:{RPC_PORT}/jsonrpc"
 AUTOSTART = os.environ.get("ARIA2_AUTOSTART", "1") == "1"
 
 SESSIONS = set()  # live login tokens (in memory only)
+
+# Request-body caps for POST endpoints: JSON calls are tiny; the torrent
+# upload carries a base64 .torrent, so it gets a much larger allowance.
+BODY_LIMIT_JSON = 2 * 1024 * 1024
+BODY_LIMIT_TORRENT = 64 * 1024 * 1024
+
+
+def clamp_dir(raw):
+    """Resolve a client-supplied dir against DOWNLOAD_DIR.
+
+    Returns the absolute path string when it stays inside the download
+    root, else None. Relative paths are interpreted under DOWNLOAD_DIR.
+    Every entry point that accepts a dir goes through here, so a task can
+    never be aimed outside the download directory.
+    """
+    if raw is None or str(raw).strip() == "":
+        return None
+    p = Path(str(raw))
+    if not p.is_absolute():
+        p = DOWNLOAD_DIR / p
+    try:
+        r = p.resolve()
+    except Exception:
+        return None
+    if r == DOWNLOAD_DIR or DOWNLOAD_DIR in r.parents:
+        return str(r)
+    return None
 LOGIN_MAX_FAILS = int(_env("LOGIN_MAX_FAILS", "5"))
 LOGIN_LOCK_SECONDS = int(_env("LOGIN_LOCK_SECONDS", "900"))
 LOGIN_FAILS = {}  # client key -> (consecutive failures, locked-until epoch)
@@ -351,7 +378,53 @@ def _record_history(tasks) -> None:
             tmp.replace(HISTORY_PATH)
         except OSError:
             pass
+    _record_stats(add)
     _fire_webhooks(add)
+
+
+# ------------------------------------------------------------ statistics
+# Lifetime + per-day downloaded bytes, counted once per task: the history
+# harvester only ever passes each gid here the first time it is recorded,
+# so restarts and re-polls cannot double-count.
+STATS_PATH = DATA_DIR / "stats.json"
+_stats_lock = threading.Lock()
+
+
+def load_stats() -> dict:
+    try:
+        s = json.loads(STATS_PATH.read_text(encoding="utf-8"))
+        if isinstance(s, dict):
+            days = s.get("days") if isinstance(s.get("days"), dict) else {}
+            return {"total_bytes": int(s.get("total_bytes") or 0),
+                    "total_tasks": int(s.get("total_tasks") or 0),
+                    "days": {str(k): int(v) for k, v in days.items()}}
+    except Exception:
+        pass
+    return {"total_bytes": 0, "total_tasks": 0, "days": {}}
+
+
+def _record_stats(entries) -> None:
+    done = [e for e in entries or [] if e.get("status") == "complete"]
+    if not done:
+        return
+    with _stats_lock:
+        s = load_stats()
+        today = time.strftime("%Y-%m-%d")
+        for e in done:
+            n = int(e.get("total") or e.get("done") or 0)
+            s["total_bytes"] += n
+            s["total_tasks"] += 1
+            s["days"][today] = s["days"].get(today, 0) + n
+        if len(s["days"]) > 400:  # keep the file small; drop oldest days
+            for k in sorted(s["days"])[:-400]:
+                del s["days"][k]
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = STATS_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(STATS_PATH)
+        except OSError:
+            pass
 
 
 def _fire_webhooks(entries) -> None:
@@ -737,11 +810,12 @@ ALLOWED_METHODS = {
     "remove", "removeDownloadResult", "purgeDownloadResult",
     "getGlobalStat", "getGlobalOption", "changeGlobalOption", "changeOption",
     "getVersion", "getSessionInfo", "saveSession", "getFiles", "getUris",
+    "changePosition",
 }
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.2.0"
+    server_version = "ToFetch/1.3.0"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
@@ -815,6 +889,24 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._need_auth()
             return self._json(200, {"entries": load_history()})
+        if path == "/api/stats":
+            if not self._authed():
+                return self._need_auth()
+            s = load_stats()
+            s["today"] = s["days"].get(time.strftime("%Y-%m-%d"), 0)
+            return self._json(200, s)
+        if path == "/api/settings/export":
+            if not self._authed():
+                return self._need_auth()
+            body = json.dumps(load_settings(), ensure_ascii=False, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             "attachment; filename=tofetch-settings.json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/export":
             if not self._authed():
                 return self._need_auth()
@@ -861,6 +953,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        limit = BODY_LIMIT_TORRENT if path == "/api/torrent" else BODY_LIMIT_JSON
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            clen = 0
+        if clen > limit:
+            if clen <= BODY_LIMIT_TORRENT:
+                # Drain a modest oversized body so the client finishes its
+                # send and can actually read the 413 (an early close would
+                # surface as a broken pipe instead). Truly huge bodies get
+                # an immediate reject + connection close below.
+                try:
+                    remaining = clen
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(1 << 16, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except Exception:
+                    pass
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                                  {"error": "request body too large"})
+            return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                              {"error": "request body too large"},
+                              extra={"Connection": "close"})
         if path == "/api/login":
             body = self._read_json()
             if not PASSWORD:
@@ -876,8 +993,10 @@ class Handler(BaseHTTPRequestHandler):
                 LOGIN_FAILS.pop(key, None)
                 token = secrets.token_hex(24)
                 SESSIONS.add(token)
+                proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+                secure = "; Secure" if proto == "https" else ""
                 return self._json(200, {"ok": True}, extra={
-                    "Set-Cookie": f"tofetch_session={token}; Path=/; HttpOnly; SameSite=Lax",
+                    "Set-Cookie": f"tofetch_session={token}; Path=/; HttpOnly; SameSite=Lax{secure}",
                 })
             fails += 1
             if fails >= LOGIN_MAX_FAILS:
@@ -895,39 +1014,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._need_auth()
         if path == "/api/settings":
+            err = self._merge_settings(self._read_json())
+            if err:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": err})
+            return self._json(200, {"ok": True, "settings": load_settings()})
+        if path == "/api/settings/import":
             body = self._read_json()
-            settings = load_settings()
-            for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
-                vals = body.get(group)
-                if isinstance(vals, dict):
-                    for k, v in vals.items():
-                        if k not in keys:
-                            return self._json(HTTPStatus.BAD_REQUEST, {"error": f"unknown setting: {k}"})
-                        v = str(v).strip()
-                        if v == "":
-                            settings[group].pop(k, None)  # empty = back to engine default
-                        elif _valid_setting(k, v):
-                            settings[group][k] = v
-                        else:
-                            return self._json(HTTPStatus.BAD_REQUEST, {"error": f"bad value for {k}"})
-            sched = body.get("schedule")
-            if isinstance(sched, dict):
-                cleaned = _clean_schedule(sched)
-                if cleaned is None:
-                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "bad schedule"})
-                settings["schedule"] = cleaned
-            prefs = body.get("prefs")
-            if isinstance(prefs, dict):
-                for k, v in prefs.items():
-                    if not isinstance(v, (str, bool, int, float)) or len(str(v)) > 500:
-                        return self._json(HTTPStatus.BAD_REQUEST, {"error": f"bad pref: {k}"})
-                    if v == "":
-                        settings["prefs"].pop(k, None)
-                    else:
-                        settings["prefs"][k] = v
-            save_settings(settings)
-            apply_global_settings()
-            return self._json(200, {"ok": True, "settings": settings})
+            if not isinstance(body, dict):
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "settings object required"})
+            err = self._merge_settings(body)
+            if err:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": err})
+            return self._json(200, {"ok": True, "settings": load_settings()})
         if path == "/api/history-clear":
             with _history_lock:
                 try:
@@ -967,7 +1065,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.BAD_REQUEST, {"error": "bad torrent data"})
             options = {}
             if body.get("dir"):
-                options["dir"] = str((DOWNLOAD_DIR / body["dir"]).resolve())
+                clamped = clamp_dir(body["dir"])
+                if clamped is None:
+                    return self._json(HTTPStatus.BAD_REQUEST,
+                                      {"error": "dir outside download dir"})
+                options["dir"] = clamped
             extra = body.get("options")
             if isinstance(extra, dict):
                 for k, v in extra.items():
@@ -989,6 +1091,44 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     # -- pieces --------------------------------------------------------
+    def _merge_settings(self, body):
+        """Validate a settings body exactly like POST /api/settings does,
+        then save + apply. Returns an error string, or None on success."""
+        if not isinstance(body, dict):
+            return "settings object required"
+        settings = load_settings()
+        for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
+            vals = body.get(group)
+            if isinstance(vals, dict):
+                for k, v in vals.items():
+                    if k not in keys:
+                        return f"unknown setting: {k}"
+                    v = str(v).strip()
+                    if v == "":
+                        settings[group].pop(k, None)  # empty = engine default
+                    elif _valid_setting(k, v):
+                        settings[group][k] = v
+                    else:
+                        return f"bad value for {k}"
+        sched = body.get("schedule")
+        if isinstance(sched, dict):
+            cleaned = _clean_schedule(sched)
+            if cleaned is None:
+                return "bad schedule"
+            settings["schedule"] = cleaned
+        prefs = body.get("prefs")
+        if isinstance(prefs, dict):
+            for k, v in prefs.items():
+                if not isinstance(v, (str, bool, int, float)) or len(str(v)) > 500:
+                    return f"bad pref: {k}"
+                if v == "":
+                    settings["prefs"].pop(k, None)
+                else:
+                    settings["prefs"][k] = v
+        save_settings(settings)
+        apply_global_settings()
+        return None
+
     def _remove_files(self):
         """Remove a task AND delete its downloaded files from disk.
 
@@ -1062,6 +1202,19 @@ class Handler(BaseHTTPRequestHandler):
         short = method.split(".", 1)[-1]
         if short not in ALLOWED_METHODS:
             return self._json(HTTPStatus.FORBIDDEN, {"error": f"method not allowed: {method}"})
+        if short in ("addUri", "addTorrent", "changeOption"):
+            # Clamp any caller-supplied dir into the download root.
+            params = list(params)
+            oi = 2 if short == "addTorrent" else 1
+            if len(params) > oi and isinstance(params[oi], dict):
+                opts = dict(params[oi])
+                if "dir" in opts:
+                    clamped = clamp_dir(opts["dir"])
+                    if clamped is None:
+                        del opts["dir"]
+                    else:
+                        opts["dir"] = clamped
+                params[oi] = opts
         if short == "addUri":
             # Merge the persisted per-task defaults (retry policy) under
             # whatever options the caller supplied.

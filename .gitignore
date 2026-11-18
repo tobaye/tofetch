@@ -17,3 +17,6 @@ android/app/src/main/jniLibs/
 android/app/src/main/python/server.py
 android/app/src/main/python/aria2.conf
 android/app/src/main/python/static/
+cache/
+dist_build/
+.signing/

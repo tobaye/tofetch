@@ -1,0 +1,13 @@
+[Unit]
+Description=ToFetch download manager
+After=network.target
+
+[Service]
+Type=simple
+# Adjust these two paths to where you unpacked ToFetch-Linux:
+WorkingDirectory=%h/ToFetch-Linux
+ExecStart=%h/ToFetch-Linux/tofetch.sh
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

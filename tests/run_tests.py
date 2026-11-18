@@ -16,6 +16,13 @@ flows that must never silently break:
      known-gap soft check and was promoted once the fix landed).
   T8 login throttle: 5 wrong passwords lock the client out; even the
      right password gets 429 until the lock expires, then login works.
+  T17 changePosition reorders the waiting queue (POS_SET to front)
+  T18 stats: a completed download is counted once (bytes + task count),
+      re-harvesting the same task does not double-count
+  T19 settings export/import round-trip; bad import is rejected
+  T20 dir clamping: addUri dir outside the download root is dropped,
+      a subdir is honoured, /api/torrent with an escaping dir is a 400
+  T21 request-body cap: an oversized JSON body gets a 413
 
 Usage: python3 tests/run_tests.py
 Env:   TOFETCH_TEST_ARIA2=/path/to/aria2c   (default: tools/aria2c, else PATH)
@@ -260,6 +267,149 @@ def main() -> int:
             fetched = r.read()
         ok = ok and hashlib.sha256(fetched).hexdigest() == small_hash
         report("T1 download completes byte-exact + fetch-back", ok)
+
+
+        # ---- v1.3.0 batch (fresh instances, small files only) ----
+        def raw_req(url, body=None, method=None):
+            req = urllib.request.Request(
+                url, data=body,
+                headers={"Content-Type": "application/json"},
+                method=method or ("POST" if body is not None else "GET"))
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode(errors="replace")
+
+        # T17 changePosition: third queued task jumps to the front
+        work17 = Path(tempfile.mkdtemp(prefix="tofetch-test17-"))
+        td17 = ToFetch(work17, aria2, free_port(), free_port())
+        try:
+            td17.wait_engine()
+            td17.rpc("changeGlobalOption", [{"max-concurrent-downloads": "1",
+                                             "max-overall-download-limit": "3M"}])
+            td17.rpc("addUri", [[f"{base}/big.bin"], {"out": "hold.bin"}])
+            g17a = td17.rpc("addUri", [[f"{base}/small.bin"], {"out": "q1.bin"}])
+            g17b = td17.rpc("addUri", [[f"{base}/small.bin"], {"out": "q2.bin"}])
+            time.sleep(1.5)
+            td17.rpc("changePosition", [g17b, 0, "POS_SET"])
+            time.sleep(0.5)
+            waiting = td17.rpc("tellWaiting", [0, 10, ["gid"]])
+            ok17 = bool(waiting) and waiting[0]["gid"] == g17b
+            report("T17 changePosition moves a waiting task to the front", ok17,
+                   f"(queue={[w['gid'][-4:] for w in waiting]})")
+        finally:
+            td17.stop()
+            shutil.rmtree(work17, ignore_errors=True)
+
+        # T18 stats: completion counted exactly once
+        work18 = Path(tempfile.mkdtemp(prefix="tofetch-test18-"))
+        td18 = ToFetch(work18, aria2, free_port(), free_port())
+        try:
+            td18.wait_engine()
+            gid18 = td18.rpc("addUri", [[f"{base}/small.bin"], {}])
+            td18.wait_complete(gid18, 30)
+            stats = {}
+            for _ in range(20):
+                td18.rpc("tellStopped", [0, 100, ["gid", "status", "totalLength",
+                                                  "completedLength", "files", "dir",
+                                                  "errorMessage"]])
+                _, body18 = raw_req(td18.ui + "/api/stats")
+                stats = json.loads(body18)
+                if stats.get("total_tasks", 0) >= 1:
+                    break
+                time.sleep(0.5)
+            once = (stats.get("total_bytes") == 1024 * 1024
+                    and stats.get("total_tasks") == 1
+                    and stats.get("today") == 1024 * 1024)
+            td18.rpc("tellStopped", [0, 100, ["gid", "status", "totalLength",
+                                              "completedLength", "files", "dir",
+                                              "errorMessage"]])
+            time.sleep(0.5)
+            _, body18b = raw_req(td18.ui + "/api/stats")
+            stats2 = json.loads(body18b)
+            report("T18 stats count a completion once, no double-count",
+                   once and stats2.get("total_tasks") == 1
+                   and stats2.get("total_bytes") == 1024 * 1024,
+                   f"(stats={stats})")
+        finally:
+            td18.stop()
+            shutil.rmtree(work18, ignore_errors=True)
+
+        # T19 settings export/import round-trip + rejection
+        work19 = Path(tempfile.mkdtemp(prefix="tofetch-test19-"))
+        td19 = ToFetch(work19, aria2, free_port(), free_port())
+        try:
+            td19.wait_engine()
+            td19.api("/api/settings", {"global": {"max-concurrent-downloads": "9"}})
+            _, exp19 = raw_req(td19.ui + "/api/settings/export")
+            exported = json.loads(exp19)
+            code_i, _ = raw_req(td19.ui + "/api/settings/import",
+                                json.dumps({"global": {"max-concurrent-downloads": "6"},
+                                            "prefs": {"webhook_url": "https://example.invalid/h"}}).encode())
+            _, got19 = raw_req(td19.ui + "/api/settings")
+            gotj = json.loads(got19)
+            code_bad, _ = raw_req(td19.ui + "/api/settings/import",
+                                  json.dumps({"global": {"bogus-key": "1"}}).encode())
+            ok19 = (exported.get("global", {}).get("max-concurrent-downloads") == "9"
+                    and code_i == 200
+                    and gotj.get("global", {}).get("max-concurrent-downloads") == "6"
+                    and gotj.get("prefs", {}).get("webhook_url") == "https://example.invalid/h"
+                    and code_bad == 400)
+            report("T19 settings export/import round-trips, bad import 400", ok19,
+                   f"(import={code_i}, bad={code_bad})")
+        finally:
+            td19.stop()
+            shutil.rmtree(work19, ignore_errors=True)
+
+        # T20 dir clamping on addUri and /api/torrent
+        work20 = Path(tempfile.mkdtemp(prefix="tofetch-test20-"))
+        td20 = ToFetch(work20, aria2, free_port(), free_port())
+        try:
+            td20.wait_engine()
+            dl20 = str(work20 / "downloads")
+            g_out = td20.rpc("addUri", [[f"{base}/small.bin"],
+                                        {"out": "esc.bin", "dir": "/tmp/tf-outside"}])
+            st_out = td20.rpc("tellStatus", [g_out, ["dir"]])
+            try:
+                td20.rpc("remove", [g_out, True])
+            except Exception:
+                try:
+                    td20.rpc("removeDownloadResult", [g_out])
+                except Exception:
+                    pass
+            g_sub = td20.rpc("addUri", [[f"{base}/small.bin"],
+                                        {"out": "sub.bin", "dir": "sub1"}])
+            st_sub = td20.rpc("tellStatus", [g_sub, ["dir"]])
+            td20.wait_complete(g_sub, 30)
+            import base64 as _b64
+            code_t, body_t = raw_req(td20.ui + "/api/torrent", json.dumps(
+                {"data": _b64.b64encode(b"x").decode(), "dir": "../escape"}).encode())
+            ok20 = (st_out.get("dir") == dl20
+                    and st_sub.get("dir") == dl20 + "/sub1"
+                    and (work20 / "downloads" / "sub1" / "sub.bin").exists()
+                    and code_t == 400 and "outside" in body_t)
+            report("T20 dir clamped to download root on all entry points", ok20,
+                   f"(outside->{st_out.get('dir')}, torrent={code_t})")
+        finally:
+            td20.stop()
+            shutil.rmtree(work20, ignore_errors=True)
+
+        # T21 body cap: >2MB JSON body is a 413, normal calls still work
+        work21 = Path(tempfile.mkdtemp(prefix="tofetch-test21-"))
+        td21 = ToFetch(work21, aria2, free_port(), free_port())
+        try:
+            td21.wait_engine()
+            big_body = json.dumps({"global": {"bt-tracker": "x" * (3 * 1024 * 1024)}}).encode()
+            code21, _ = raw_req(td21.ui + "/api/settings", big_body)
+            code_ok, _ = raw_req(td21.ui + "/api/settings",
+                                 json.dumps({"task": {"max-tries": "3"}}).encode())
+            report("T21 oversized body gets 413, normal body still works",
+                   code21 == 413 and code_ok == 200,
+                   f"(big={code21}, normal={code_ok})")
+        finally:
+            td21.stop()
+            shutil.rmtree(work21, ignore_errors=True)
 
         # T14 export/import: an unfinished task survives the round-trip
         work14 = Path(tempfile.mkdtemp(prefix="tofetch-test14-"))

@@ -1,0 +1,1 @@
+{"action":{"default_title":"ToFetch Connect：把本页发送到 ToFetch"},"background":{"service_worker":"background.js"},"description":"把浏览器下载、右键链接一键发送到 ToFetch 下载管理器（带 Cookie / Referer）。","host_permissions":["<all_urls>"],"manifest_version":3,"name":"ToFetch Connect","options_page":"options.html","permissions":["contextMenus","downloads","storage","cookies"],"version":"1.3.0"}

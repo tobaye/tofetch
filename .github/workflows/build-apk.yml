@@ -38,24 +38,50 @@ jobs:
           base=https://github.com/AnInsomniacy/aria2-next/releases/download/v3.1.0
           mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
           curl -fsSL -o /tmp/a64 "$base/aria2-next-3.1.0-android-arm64"
-          curl -fsSL -o /tmp/x64 "$base/aria2-next-3.1.0-linux-x86_64"
           echo "7e4ce96d2e29bf4f1dff0f0d0bc737488883cc6791c1795208f7f634994c80e3  /tmp/a64" | sha256sum -c -
-          echo "5a264fc39312cc1abc6d12cfd2d96464d27f0349fd7cb5e0cbf1ee5bd686e890  /tmp/x64" | sha256sum -c -
           cp /tmp/a64 android/app/src/main/jniLibs/arm64-v8a/libaria2c.so
-          cp /tmp/x64 android/app/src/main/jniLibs/x86_64/libaria2c.so
+          # x86_64: our own NDK static build, published by the
+          # build-aria2-x86_64 workflow to the "engines" release. If it is
+          # not there yet, ship arm64-only instead of the old glibc
+          # placeholder that could never run on Android.
+          if curl -fsSL -o /tmp/x64 https://github.com/tobaye/tofetch/releases/download/engines/aria2-x86_64-android; then
+            file /tmp/x64
+            cp /tmp/x64 android/app/src/main/jniLibs/x86_64/libaria2c.so
+          else
+            echo "no x86_64 engine asset; building arm64-only APK"
+            rmdir android/app/src/main/jniLibs/x86_64
+            sed -i "s/abiFilters 'arm64-v8a', 'x86_64'/abiFilters 'arm64-v8a'/" android/app/build.gradle
+          fi
 
-      - name: Build APK (debug-signed for now)
+      - name: Restore release keystore
+        env:
+          KS_B64: ${{ secrets.TOFETCH_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > android/tofetch-release.p12
+            echo "keystore restored ($(stat -c%s android/tofetch-release.p12) bytes)"
+          else
+            echo "::error::TOFETCH_KEYSTORE_B64 secret is not set"
+            exit 1
+          fi
+
+      - name: Build APK (release-signed, permanent keystore)
         working-directory: android
-        run: gradle assembleDebug --stacktrace
+        env:
+          TOFETCH_KEYSTORE: ${{ github.workspace }}/android/tofetch-release.p12
+          TOFETCH_KEY_ALIAS: ${{ secrets.TOFETCH_KEY_ALIAS }}
+          TOFETCH_STORE_PASS: ${{ secrets.TOFETCH_STORE_PASS }}
+          TOFETCH_KEY_PASS: ${{ secrets.TOFETCH_KEY_PASS }}
+        run: gradle assembleRelease --stacktrace
 
-      - name: Attach APK to the v1.2.0 release
+      - name: Attach APK to the v1.3.0 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -1)
+          apk=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
           echo "built: $apk"
           cp "$apk" ToFetch-Android.apk
-          gh release upload v1.2.0 ToFetch-Android.apk --clobber || \
-            gh release create v1.2.0 --title "ToFetch 1.2.0" \
-              --notes "ToFetch 1.2.0 - a tiny self-hosted download manager (aria2 engine, zero-dependency Python core, single-file web UI). Android APK (debug-signed), plus server / Windows / Linux / Termux packages." \
+          gh release upload v1.3.0 ToFetch-Android.apk --clobber || \
+            gh release create v1.3.0 --title "ToFetch 1.3.0" \
+              --notes "ToFetch 1.3.0 - a tiny self-hosted download manager (aria2 engine, zero-dependency Python core, single-file web UI). Android APK (release-signed with the permanent keystore), plus server / Windows / Linux / Termux packages." \
               ToFetch-Android.apk

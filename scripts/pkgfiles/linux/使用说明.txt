@@ -1,0 +1,48 @@
+﻿ToFetch Linux 版使用说明
+========================
+
+【前提】系统装有 Python 3（绝大多数发行版自带；
+没有就装：sudo apt install python3 / sudo dnf install python3）。
+
+【启动】解压后在文件夹里执行：
+    chmod +x tofetch.sh
+    ./tofetch.sh
+浏览器会自动打开 http://localhost:8077（没自动打开就手动输）。
+
+【使用】粘贴链接/磁力链添加任务，也可上传 .torrent。
+免密码，默认只监听本机（127.0.0.1），外人进不来。
+如需从局域网其他设备打开：TOFETCH_HOST=0.0.0.0 ./tofetch.sh
+——这样开务必同时设密码：再加 TOFETCH_PASSWORD=你的密码。
+
+【引擎】自带 x86_64 与 aarch64 两个引擎，启动时按 CPU 自动选；
+都不可用时自动改用系统 aria2（apt install aria2）。
+
+【常驻】想开机自启：把 tofetch.service 里的路径改成你的解压目录，
+复制到 ~/.config/systemd/user/ 后执行：
+    systemctl --user enable --now tofetch
+
+【文件】默认存到 ~/Downloads/ToFetch，可用环境变量改：
+    TOFETCH_DOWNLOAD_DIR=/path ./tofetch.sh
+
+【停止】终端里 Ctrl+C。任务进度自动保存，下次接着下。
+【删除】直接删文件夹。
+
+【已知限制】如果程序被强行杀掉（断电、系统杀后台），
+已下载进度可能回退一段（引擎按自己的节奏存进度点），
+任务本身不会丢、文件最终是对的，只是要多重下一截。
+正常用 Ctrl+C / 关闭窗口退出则没有这个问题。
+
+设置（限速、定时、通知等）会保存在 data 文件夹里，重启自动恢复。
+
+【可选：磁力/种子文件关联】
+把 tofetch.desktop 里的 Exec 路径改成你的解压目录后，
+复制到 ~/.local/share/applications/，再执行：
+    xdg-mime default tofetch.desktop x-scheme-handler/magnet
+    xdg-mime default tofetch.desktop application/x-bittorrent
+之后点磁力链接、双击 .torrent 都会经 tofetch-open.sh 送进 ToFetch
+（服务没在跑时会自动拉起）。
+
+【可选：开机自启（图形会话）】
+把同一份 tofetch.desktop 的 Exec 改成指向 tofetch.sh，
+复制到 ~/.config/autostart/ 即可登录自启；
+或用上面的 systemd user unit 常驻。

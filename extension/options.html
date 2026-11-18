@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ToFetch Connect 设置</title>
+<style>
+  body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:24px;max-width:520px;color:#1d262e}
+  label{display:block;margin:14px 0 4px;color:#444}
+  input[type=text],input[type=password]{width:100%;padding:8px 10px;border:1px solid #c9d1d9;border-radius:8px;box-sizing:border-box}
+  button{margin-top:16px;padding:8px 18px;border-radius:8px;border:1px solid #c9d1d9;cursor:pointer}
+  button.primary{background:#d4a017;border-color:#d4a017;font-weight:600}
+  #msg{margin-top:12px;color:#2ea043}
+  .row{display:flex;gap:8px;align-items:center;margin-top:14px}
+  .row input{margin:0}
+</style>
+</head>
+<body>
+<h2>ToFetch Connect</h2>
+<label>ToFetch 地址（本机版默认即可；服务器版填它的地址）</label>
+<input type="text" id="server" placeholder="http://127.0.0.1:8077">
+<label>访问密码（没设密码就留空）</label>
+<input type="password" id="password" placeholder="ToFetch 的登录密码">
+<div class="row">
+  <input type="checkbox" id="intercept">
+  <span>拦截浏览器下载，自动转投 ToFetch</span>
+</div>
+<div>
+  <button class="primary" id="save">保存</button>
+  <button id="test">测试连接</button>
+</div>
+<p id="msg"></p>
+<script src="options.js"></script>
+</body>
+</html>

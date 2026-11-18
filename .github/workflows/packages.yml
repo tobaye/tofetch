@@ -1,0 +1,47 @@
+name: packages
+
+# Assemble the three local packages (scripts/build_packages.py, all
+# payloads checksum-pinned) plus the browser-extension zip, and attach
+# them to the release. Runs when a release is published, or manually
+# against an existing tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach packages to"
+        required: true
+        default: "v1.3.0"
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the three local packages
+        run: python3 scripts/build_packages.py
+
+      - name: Zip the browser extension
+        run: |
+          cd extension
+          zip -r ../dist/ToFetch-Connect.zip . -x "*.DS_Store"
+          cd ..
+          ls -la dist/
+
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/ToFetch-Windows.zip dist/ToFetch-Linux.zip dist/ToFetch-Android.zip dist/ToFetch-Connect.zip --clobber

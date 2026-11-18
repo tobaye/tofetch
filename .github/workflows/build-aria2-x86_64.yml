@@ -1,0 +1,120 @@
+name: build-aria2-x86_64
+
+# Cross-build a real Android x86_64 aria2 engine with the NDK, following
+# aria2's official android-config route (deps statically linked into a
+# private prefix: zlib, OpenSSL, c-ares, expat, libssh2). The product is
+# published to the "engines" release, where build-apk.yml picks it up.
+# Replaces the old linux-glibc placeholder that could never run on
+# Android. Manual dispatch only; expect ~30-60 min per full build.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+
+      - name: Build deps and aria2 (x86_64, API 29)
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -eux
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config dpkg-dev
+          export ANDROID_HOME=$PWD/android-home
+          export PREFIX=$ANDROID_HOME/usr/local
+          mkdir -p "$PREFIX"
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          TRIPLE=x86_64-linux-android
+          API=29
+          WORK=/tmp/depsbuild
+          mkdir -p "$WORK" && cd "$WORK"
+
+          common_env() {
+            export CC=$TC/${TRIPLE}${API}-clang
+            export CXX=$TC/${TRIPLE}${API}-clang++
+            export AR=$TC/llvm-ar
+            export RANLIB=$TC/llvm-ranlib
+            export STRIP=$TC/llvm-strip
+            export CFLAGS="-Os -fPIE"
+            export CXXFLAGS="-Os -fPIE"
+            export CPPFLAGS="-I$PREFIX/include"
+            export LDFLAGS="-fPIE -pie -L$PREFIX/lib"
+            export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          }
+
+          # ---- zlib 1.3.1 (static)
+          curl -fsSL -o zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          tar xf zlib.tar.gz && cd zlib-1.3.1
+          common_env
+          ./configure --prefix="$PREFIX" --static
+          make -j"$(nproc)" && make install
+          cd "$WORK"
+
+          # ---- OpenSSL 3.0.15 (static, its own Android toolchain logic)
+          curl -fsSL -o openssl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz
+          tar xf openssl.tar.gz && cd openssl-3.0.15
+          env -u CC -u CXX -u AR -u RANLIB -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+            ANDROID_NDK_ROOT="$NDK" PATH="$TC:$PATH" \
+            ./Configure android-x86_64 -D__ANDROID_API__=29 \
+              --prefix="$PREFIX" --openssldir="$PREFIX/ssl" no-shared no-tests
+          env ANDROID_NDK_ROOT="$NDK" PATH="$TC:$PATH" make -j"$(nproc)" build_libs
+          make install_dev
+          cd "$WORK"
+
+          # ---- c-ares 1.34.3 (static)
+          curl -fsSL -o cares.tar.gz https://github.com/c-ares/c-ares/releases/download/v1.34.3/c-ares-1.34.3.tar.gz
+          tar xf cares.tar.gz && cd c-ares-1.34.3
+          common_env
+          ./configure --host=$TRIPLE --prefix="$PREFIX" --disable-shared --enable-static
+          make -j"$(nproc)" && make install
+          cd "$WORK"
+
+          # ---- expat 2.6.3 (static)
+          curl -fsSL -o expat.tar.xz https://github.com/libexpat/libexpat/releases/download/R_2_6_3/expat-2.6.3.tar.xz
+          tar xf expat.tar.xz && cd expat-2.6.3
+          common_env
+          ./configure --host=$TRIPLE --prefix="$PREFIX" --disable-shared --enable-static --without-docbook --without-examples --without-tests
+          make -j"$(nproc)" && make install
+          cd "$WORK"
+
+          # ---- libssh2 1.11.0 (static, OpenSSL crypto)
+          curl -fsSL -o libssh2.tar.gz https://github.com/libssh2/libssh2/releases/download/libssh2-1.11.0/libssh2-1.11.0.tar.gz
+          tar xf libssh2.tar.gz && cd libssh2-1.11.0
+          common_env
+          ./configure --host=$TRIPLE --prefix="$PREFIX" --disable-shared --enable-static \
+            --with-crypto=openssl --with-libssl-prefix="$PREFIX" --with-libz-prefix="$PREFIX"
+          make -j"$(nproc)" && make install
+          cd "$WORK"
+
+          # ---- aria2 1.37.0 via the official android-config (arch-swapped)
+          curl -fsSL -o aria2.tar.xz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz
+          tar xf aria2.tar.xz && cd aria2-1.37.0
+          sed 's/aarch64/x86_64/g' android-config > android-config-x64
+          chmod +x android-config-x64
+          ./android-config-x64
+          make -j"$(nproc)"
+          "$TC/llvm-strip" src/aria2c || true
+          file src/aria2c
+          file src/aria2c | grep -q "x86-64"
+          file src/aria2c | grep -q "ELF 64-bit"
+          cp src/aria2c "$GITHUB_WORKSPACE/aria2-x86_64-android"
+          sha256sum "$GITHUB_WORKSPACE/aria2-x86_64-android"
+
+      - name: Publish engine to the "engines" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload engines aria2-x86_64-android --clobber || \
+            gh release create engines --title "Engine binaries" \
+              --notes "Self-built engine binaries. aria2-x86_64-android: aria2 1.37.0 cross-built with NDK r26d (official android-config route, deps statically linked), consumed by build-apk.yml for the APK's x86_64 slot." \
+              aria2-x86_64-android

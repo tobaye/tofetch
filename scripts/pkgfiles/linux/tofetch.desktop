@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ToFetch
+Comment=ToFetch 下载管理器
+Exec=/path/to/ToFetch-Linux/tofetch-open.sh %u
+Icon=applications-internet
+Terminal=false
+Categories=Network;FileTransfer;
+MimeType=application/x-bittorrent;x-scheme-handler/magnet;
