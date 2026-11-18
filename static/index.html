@@ -878,7 +878,11 @@ const DRIVES = [
   {key: "quark", name: "夸克网盘", re: /pan\.quark\.cn\/s\/[A-Za-z0-9]+/},
   {key: "aliyun", name: "阿里云盘", re: /(aliyundrive|alipan)\.com\/s\/[A-Za-z0-9_-]+/},
   {key: "pan123", name: "123云盘", re: /(123pan|123684|123865)\.com\/s\/[A-Za-z0-9_-]+/},
-  {key: "lanzou", name: "蓝奏云", re: /lanzou[a-z]?\.com\/[A-Za-z0-9]+/}
+  {key: "lanzou", name: "蓝奏云", re: /lanzou[a-z]?\.com\/[A-Za-z0-9]+/},
+  {key: "guangya", name: "光鸭云盘", re: /guangyapan\.com\/s\/[A-Za-z0-9_-]+/},
+  {key: "cmcc", name: "移动云盘", re: /(?:yun|caiyun)\.139\.com\//},
+  {key: "tianyi", name: "天翼云盘", re: /cloud\.189\.cn\/(?:t|web\/share)/},
+  {key: "xunlei", name: "迅雷云盘", re: /pan\.xunlei\.com\/s\/[A-Za-z0-9_-]+/}
 ];
 function detectDrive(text, links){
   const hint = $("#driveHint");
