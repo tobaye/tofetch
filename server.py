@@ -77,6 +77,74 @@ LOGIN_LOCK_SECONDS = int(_env("LOGIN_LOCK_SECONDS", "900"))
 LOGIN_FAILS = {}  # client key -> (consecutive failures, locked-until epoch)
 ENGINE_ERROR = ""  # why the engine is not running, surfaced in /api/state
 
+# ------------------------------------------------------------- settings
+# User-tunable engine settings, persisted in the data dir so they survive
+# restarts (aria2 itself forgets changeGlobalOption on exit). Two groups:
+#   "global": applied to the engine via changeGlobalOption
+#   "task":   defaults merged into every addUri/addTorrent call
+SETTINGS_PATH = DATA_DIR / "settings.json"
+GLOBAL_OPT_KEYS = {
+    "max-overall-download-limit", "max-overall-upload-limit",
+    "max-concurrent-downloads", "max-connection-per-server", "split",
+    "all-proxy", "bt-tracker", "seed-ratio", "seed-time",
+}
+TASK_OPT_KEYS = {"max-tries", "retry-wait"}
+# Per-task options the add dialog may pass through (advanced section).
+ADD_OPT_KEYS = {
+    "split", "max-connection-per-server", "max-download-limit",
+    "user-agent", "referer", "header", "max-tries", "retry-wait",
+    "all-proxy", "checksum",
+}
+
+
+def load_settings() -> dict:
+    try:
+        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    out = {"global": {}, "task": {}}
+    if isinstance(raw, dict):
+        for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
+            vals = raw.get(group)
+            if isinstance(vals, dict):
+                out[group] = {k: str(v) for k, v in vals.items() if k in keys}
+    return out
+
+
+def save_settings(settings: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(SETTINGS_PATH)
+
+
+def _valid_setting(key: str, value: str) -> bool:
+    if len(value) > 8000:
+        return False
+    if key in ("all-proxy", "bt-tracker"):
+        return True
+    if key == "seed-ratio":
+        try:
+            return 0.0 <= float(value) <= 100.0
+        except ValueError:
+            return False
+    try:
+        n = int(value)
+    except ValueError:
+        return False
+    ranges = {
+        "max-overall-download-limit": (0, 10 ** 12),
+        "max-overall-upload-limit": (0, 10 ** 12),
+        "max-concurrent-downloads": (1, 50),
+        "max-connection-per-server": (1, 64),
+        "split": (1, 64),
+        "seed-time": (0, 60 * 24 * 30),
+        "max-tries": (0, 100),
+        "retry-wait": (0, 3600),
+    }
+    lo, hi = ranges.get(key, (0, 10 ** 9))
+    return lo <= n <= hi
+
 
 def log_event(msg: str) -> None:
     """Print and append to the on-disk diagnostic log (data dir)."""
@@ -142,6 +210,25 @@ def rpc_alive() -> bool:
         return False
 
 
+def apply_global_settings() -> None:
+    """Push the persisted global options into the running engine."""
+    settings = load_settings()
+    if settings["global"] and rpc_alive():
+        try:
+            rpc_call("aria2.changeGlobalOption", [settings["global"]], timeout=5)
+            log_event("applied saved global settings")
+        except Exception:
+            pass
+
+
+def with_task_defaults(options: dict) -> dict:
+    """Merge the persisted per-task defaults (retry policy) into add options."""
+    merged = dict(options or {})
+    for k, v in load_settings()["task"].items():
+        merged.setdefault(k, v)
+    return merged
+
+
 # ---------------------------------------------------------------- aria2 child
 
 _aria2_proc = None
@@ -179,6 +266,7 @@ def start_aria2() -> None:
         f"--save-session={session}",
         "--save-session-interval=5",
         "--continue=true",
+        "--summary-interval=0",
         "--daemon=false",
     ]
     # Optional CA bundle override (Android: the engine has no system CA
@@ -318,6 +406,10 @@ class Handler(BaseHTTPRequestHandler):
                 "password": bool(PASSWORD),
                 "download_dir": str(DOWNLOAD_DIR),
             })
+        if path == "/api/settings":
+            if not self._authed():
+                return self._need_auth()
+            return self._json(200, load_settings())
         if path == "/api/log":
             if not self._authed():
                 return self._need_auth()
@@ -382,6 +474,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if not self._authed():
             return self._need_auth()
+        if path == "/api/settings":
+            body = self._read_json()
+            settings = load_settings()
+            for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
+                vals = body.get(group)
+                if isinstance(vals, dict):
+                    for k, v in vals.items():
+                        if k not in keys:
+                            return self._json(HTTPStatus.BAD_REQUEST, {"error": f"unknown setting: {k}"})
+                        v = str(v).strip()
+                        if v == "":
+                            settings[group].pop(k, None)  # empty = back to engine default
+                        elif _valid_setting(k, v):
+                            settings[group][k] = v
+                        else:
+                            return self._json(HTTPStatus.BAD_REQUEST, {"error": f"bad value for {k}"})
+            save_settings(settings)
+            apply_global_settings()
+            return self._json(200, {"ok": True, "settings": settings})
+        if path == "/api/remove-files":
+            return self._remove_files()
         if path == "/api/rpc":
             return self._proxy_rpc()
         if path == "/api/torrent":
@@ -394,6 +507,12 @@ class Handler(BaseHTTPRequestHandler):
             options = {}
             if body.get("dir"):
                 options["dir"] = str((DOWNLOAD_DIR / body["dir"]).resolve())
+            extra = body.get("options")
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if k in ADD_OPT_KEYS:
+                        options[k] = v
+            options = with_task_defaults(options)
             try:
                 resp = rpc_call("aria2.addTorrent", [data, [], options])
                 if isinstance(resp, dict) and resp.get("error"):
@@ -409,6 +528,49 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     # -- pieces --------------------------------------------------------
+    def _remove_files(self):
+        """Remove a task AND delete its downloaded files from disk.
+
+        Only paths inside the download dir are touched; the .aria2 control
+        file next to each download goes with it.
+        """
+        body = self._read_json()
+        gid = str(body.get("gid", ""))
+        if not gid:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "gid required"})
+        try:
+            resp = rpc_call("aria2.tellStatus", [gid])
+            status = resp.get("result") or {}
+        except Exception as e:
+            return self._json(HTTPStatus.BAD_GATEWAY, {"error": f"aria2: {e}"})
+        paths = [f.get("path") for f in status.get("files") or [] if f.get("path")]
+        try:
+            if status.get("status") in ("complete", "error", "removed"):
+                rpc_call("aria2.removeDownloadResult", [gid])
+            else:
+                rpc_call("aria2.remove", [gid])
+        except Exception:
+            pass
+        deleted, skipped = 0, 0
+        for p in paths:
+            for target in (Path(p), Path(p + ".aria2")):
+                try:
+                    resolved = target.resolve()
+                    if DOWNLOAD_DIR not in resolved.parents:
+                        skipped += 1
+                        continue
+                    if resolved.is_file():
+                        resolved.unlink()
+                        deleted += 1
+                except OSError:
+                    skipped += 1
+        try:
+            rpc_call("aria2.saveSession", [], timeout=3)
+        except Exception:
+            pass
+        log_event(f"remove-files gid={gid}: deleted={deleted} skipped={skipped}")
+        return self._json(200, {"ok": True, "deleted": deleted, "skipped": skipped})
+
     def _proxy_rpc(self):
         body = self._read_json()
         method = str(body.get("method", ""))
@@ -432,6 +594,13 @@ class Handler(BaseHTTPRequestHandler):
         short = method.split(".", 1)[-1]
         if short not in ALLOWED_METHODS:
             return self._json(HTTPStatus.FORBIDDEN, {"error": f"method not allowed: {method}"})
+        if short == "addUri":
+            # Merge the persisted per-task defaults (retry policy) under
+            # whatever options the caller supplied.
+            params = list(params)
+            uris = params[0] if len(params) > 0 else []
+            opts = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+            params = [uris, with_task_defaults(opts)]
         try:
             result = rpc_call(f"aria2.{short}", list(params))
             if isinstance(result, dict) and result.get("error"):
@@ -533,6 +702,7 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if AUTOSTART:
         start_aria2()
+    apply_global_settings()
     server_cls = DualStackServer if ":" in HOST else ThreadingHTTPServer
     try:
         server = server_cls((HOST, PORT), Handler)

@@ -317,6 +317,42 @@ def main() -> int:
             log_body = r.read().decode(errors="replace")
         report("T6 diagnostics log endpoint returns content",
                "aria2" in log_body and len(log_body) > 20)
+
+        # T9 settings: round-trip, engine apply, validation
+        def settings_call(method, body=None):
+            req = urllib.request.Request(
+                td.ui + "/api/settings",
+                data=json.dumps(body).encode() if body is not None else None,
+                headers={"Content-Type": "application/json"}, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+        code1, _ = settings_call("POST", {"global": {"max-concurrent-downloads": "7"},
+                                          "task": {"max-tries": "4", "retry-wait": "30"}})
+        _, got_settings = settings_call("GET")
+        engine_opt = td.rpc("getGlobalOption", [])
+        code_bad_key, _ = settings_call("POST", {"global": {"bogus-key": "1"}})
+        code_bad_val, _ = settings_call("POST", {"task": {"max-tries": "9999"}})
+        report("T9 settings persist, apply to engine, reject bad input",
+               code1 == 200
+               and got_settings.get("global", {}).get("max-concurrent-downloads") == "7"
+               and got_settings.get("task", {}).get("max-tries") == "4"
+               and str(engine_opt.get("max-concurrent-downloads")) == "7"
+               and code_bad_key == 400 and code_bad_val == 400,
+               f"(post={code1}, bad_key={code_bad_key}, bad_val={code_bad_val})")
+        settings_call("POST", {"global": {"max-concurrent-downloads": "5"}})
+
+        # T10 remove-files: task and its file both go away
+        gid10 = td.rpc("addUri", [[f"{base}/small.bin"], {"out": "t10.bin"}])
+        td.wait_complete(gid10, 30)
+        f10 = work / "downloads" / "t10.bin"
+        existed = f10.exists()
+        rm = td.api("/api/remove-files", {"gid": gid10})
+        report("T10 remove-files deletes the downloaded file",
+               existed and rm.get("deleted", 0) >= 1 and not f10.exists(),
+               f"(deleted={rm.get('deleted')})")
     finally:
         td.stop()
         httpd.shutdown()
