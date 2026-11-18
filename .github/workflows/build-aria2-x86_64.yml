@@ -6,6 +6,10 @@ name: build-aria2-x86_64
 # published to the "engines" release, where build-apk.yml picks it up.
 # Replaces the old linux-glibc placeholder that could never run on
 # Android. Manual dispatch only; expect ~30-60 min per full build.
+# OpenSSL is configured with no-module + enable-legacy so the legacy
+# provider is statically linked into libcrypto: aria2 loads it at
+# startup (Platform.cc) and exits if it is only available as a
+# loadable legacy.so module, which the APK does not ship.
 
 on:
   workflow_dispatch:
@@ -66,7 +70,7 @@ jobs:
           env -u CC -u CXX -u AR -u RANLIB -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
             ANDROID_NDK_ROOT="$NDK" PATH="$TC:$PATH" \
             ./Configure android-x86_64 -D__ANDROID_API__=29 \
-              --prefix="$PREFIX" --openssldir="$PREFIX/ssl" no-shared no-tests
+              --prefix="$PREFIX" --openssldir="$PREFIX/ssl" no-shared no-tests no-module enable-legacy
           env ANDROID_NDK_ROOT="$NDK" PATH="$TC:$PATH" make -j"$(nproc)" build_libs
           make install_dev
           cd "$WORK"
@@ -112,6 +116,9 @@ jobs:
           chmod +x android-config-x64
           ./android-config-x64
           make -j"$(nproc)"
+          # The legacy provider must be statically linked into the
+          # binary (see OpenSSL flags above); fail the build if not.
+          "$TC/llvm-nm" src/aria2c | grep -q "ossl_legacy_provider_init"
           "$TC/llvm-strip" src/aria2c || true
           file src/aria2c
           file src/aria2c | grep -q "x86-64"
