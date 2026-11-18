@@ -597,7 +597,7 @@ ALLOWED_METHODS = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.0.1"
+    server_version = "ToFetch/1.1.0"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
