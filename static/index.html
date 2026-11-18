@@ -43,7 +43,7 @@
   .task.error .bar i{background:var(--err)}
   .row{display:flex;align-items:flex-start;gap:10px}
   .row .grow{flex:1;min-width:0}
-  .acts{display:flex;gap:6px;flex-shrink:0}
+  .acts{display:flex;gap:6px;flex-shrink:1;flex-wrap:wrap;justify-content:flex-end}
   .acts button{padding:4px 9px;font-size:12.5px}
   .chip{font-size:11.5px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
   .chip.active{color:var(--accent);border-color:var(--accent)}
@@ -68,10 +68,11 @@
          align-items:center;justify-content:center}
   #login .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;
               padding:26px;width:min(340px,90vw)}
-  .hint{color:var(--dim);font-size:12.5px}
+  .hint{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
+  #probeBox,#driveHint{overflow-wrap:anywhere}
   a{color:var(--accent)}
   .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-  .tabs{display:flex;gap:6px}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap}
   .tabs button.on{background:var(--accent);border-color:var(--accent);color:#161006;font-weight:600}
   .toolbar input[type=text]{flex:1;min-width:140px;margin:0}
   .toolbar select{background:var(--panel2);color:var(--text);border:1px solid var(--line);
@@ -140,6 +141,7 @@
       <button data-f="error">出错</button>
     </div>
     <input type="text" id="q" placeholder="搜索任务名 / 链接">
+    <button id="qClear" style="display:none" onclick="clearSearch()">清除搜索</button>
     <select id="sortSel">
       <option value="def">默认排序</option>
       <option value="name">按名称</option>
@@ -210,43 +212,56 @@
   <h3 id="setTitle">设置</h3>
   <div id="setHome">
     <div class="set-nav">
-      <button onclick="showSetGroup('download')">下载与限速 ›</button>
+      <button onclick="showSetGroup('limits')">限速与并发 ›</button>
+      <button onclick="showSetGroup('network')">连接与代理 ›</button>
+      <button onclick="showSetGroup('bt')">BT 与做种 ›</button>
       <button onclick="showSetGroup('task')">任务默认 ›</button>
       <button onclick="showSetGroup('schedule')">定时计划 ›</button>
-      <button onclick="showSetGroup('notify')">通知与分类 ›</button>
-      <button onclick="showSetGroup('backup')">任务备份 ›</button>
+      <button onclick="showSetGroup('notify')">通知 ›</button>
+      <button onclick="showSetGroup('android')">安卓策略 ›</button>
+      <button onclick="showSetGroup('backup')">备份与数据 ›</button>
       <button onclick="showSetGroup('appearance')">外观 ›</button>
     </div>
-    <p class="hint" id="statsLine" style="margin-top:12px"></p>
-    <p class="hint">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
+    <p class="hint" style="margin-top:12px">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
   </div>
   <div id="setPage" style="display:none">
     <button onclick="showSetHome()" style="margin-bottom:12px">← 返回</button>
-    <div class="set-group" data-group="download">
+    <div class="set-group" data-group="limits">
       <label>最大下载速度（KB/s，0 = 不限）</label>
       <input type="number" id="setDown" min="0">
       <label>最大上传速度（KB/s，0 = 不限）</label>
       <input type="number" id="setUp" min="0">
       <label>同时下载任务数</label>
       <input type="number" id="setConc" min="1" max="50">
+    </div>
+    <div class="set-group" data-group="network">
       <label>每任务连接数（1–64，留空用引擎默认）</label>
       <input type="number" id="setConn" min="1" max="64">
       <label>分片数（1–64，留空用引擎默认）</label>
       <input type="number" id="setSplit" min="1" max="64">
       <label>代理（留空不用；如 http://127.0.0.1:7890）</label>
       <input type="text" id="setProxy" placeholder="http://host:port">
+    </div>
+    <div class="set-group" data-group="bt">
       <label>BT Tracker（逗号分隔，留空用引擎默认）</label>
       <textarea id="setTrackers" style="min-height:56px" placeholder="udp://tracker.example:1337/announce,..."></textarea>
       <label>做种比率（上传量达到下载量的该倍数后停止做种，留空用引擎默认）</label>
       <input type="text" id="setSeedRatio" placeholder="如 1.0">
       <label>做种时间（分钟，留空用引擎默认）</label>
       <input type="number" id="setSeedTime" min="0">
+      <label>Tracker 列表更新地址（留空关闭，从该地址拉取最新 Tracker 覆盖上面的设置）</label>
+      <input type="text" id="schTrackerUrl" placeholder="https://.../trackers.txt">
+      <label>Tracker 更新间隔（小时）</label>
+      <input type="number" id="schTrackerHours" min="1" max="168">
     </div>
     <div class="set-group" data-group="task">
       <label>失败自动重试次数（0 = 不重试）</label>
       <input type="number" id="setTries" min="0" max="100">
       <label>重试间隔（秒）</label>
       <input type="number" id="setRetryWait" min="0" max="3600">
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="prefCat" style="width:auto;margin:0"> 按扩展名自动分类到子目录（视频 / 音乐 / 文档 / 压缩包…）
+      </label>
     </div>
     <div class="set-group" data-group="schedule">
       <label>限速时段开始（与结束都填才生效）</label>
@@ -261,21 +276,16 @@
       <input type="time" id="schPause">
       <label>每日定时恢复全部（留空关闭）</label>
       <input type="time" id="schResume">
-      <label>Tracker 列表更新地址（留空关闭，从该地址拉取最新 Tracker 覆盖上面的设置）</label>
-      <input type="text" id="schTrackerUrl" placeholder="https://.../trackers.txt">
-      <label>Tracker 更新间隔（小时）</label>
-      <input type="number" id="schTrackerHours" min="1" max="168">
     </div>
     <div class="set-group" data-group="notify">
       <label>Webhook（任务完成/失败时把结果 POST 到这个地址，留空关闭）</label>
       <input type="text" id="prefWebhook" placeholder="https://...">
       <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
-        <input type="checkbox" id="prefCat" style="width:auto;margin:0"> 按扩展名自动分类到子目录（视频 / 音乐 / 文档 / 压缩包…）
-      </label>
-      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
         <input type="checkbox" id="prefNotify" style="width:auto;margin:0"> 下载完成时弹浏览器通知
       </label>
-      <h4 style="margin:14px 0 8px">安卓策略（仅安卓版生效）</h4>
+    </div>
+    <div class="set-group" data-group="android">
+      <p class="hint">以下策略仅在安卓版生效。</p>
       <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
         <input type="checkbox" id="prefWifiOnly" style="width:auto;margin:0"> 仅 WiFi 时下载（切到移动网络自动暂停，回到 WiFi 自动恢复）
       </label>
@@ -287,6 +297,8 @@
       </label>
     </div>
     <div class="set-group" data-group="backup">
+      <label>下载统计</label>
+      <p class="hint" id="statsLine" style="margin-bottom:14px"></p>
       <label>任务备份（换机 / 重装时迁移未完成任务）</label>
       <div style="display:flex;gap:8px;margin-bottom:12px">
         <button onclick="exportTasks()">导出任务</button>
@@ -447,15 +459,37 @@ function stallHint(t, done, speed){
   }
   return "";
 }
+function normStr(s){
+return String(s || "").toLowerCase().replace(/[\s《》（）()「」『』·・,，。:：;；!！?？'"“”‘’\-—_~|/\\[\].]+/g, "");
+}
+function makeMatcher(q){
+const raw = q.toLowerCase(), nq = normStr(q);
+const toks = q.split(/[\s《》【】（）()「」『』·・,，。:：;；!！?？'"“”‘’\-—_~|/\\[\].]+/)
+.map(normStr).filter(t => t.length >= 2);
+const wordToks = toks.filter(t => !/^\d+$/.test(t));
+const useToks = wordToks.length ? wordToks : toks;
+return s => {
+const r = String(s || "").toLowerCase(), n = normStr(s);
+if (r.includes(raw) || (nq && n.includes(nq))) return true;
+return useToks.some(tok => n.includes(tok));
+};
+}
+function clearSearch(){
+const q = $("#q");
+q.value = "";
+viewQuery = "";
+$("#qClear").style.display = "none";
+if (window.__tasks) render(window.__tasks);
+}
 function applyView(tasks){
   let v = tasks.slice();
   if (viewFilter === "doing") v = v.filter(t => ["active","waiting","paused"].includes(t.status));
   else if (viewFilter === "done") v = v.filter(t => t.status === "complete");
   else if (viewFilter === "error") v = v.filter(t => t.status === "error");
   if (viewQuery){
-    const q = viewQuery.toLowerCase();
-    v = v.filter(t => taskName(t).toLowerCase().includes(q) ||
-      (t.files||[]).some(f => (f.uris||[]).some(x => (x.uri||"").toLowerCase().includes(q))));
+    const match = makeMatcher(viewQuery);
+    v = v.filter(t => match(taskName(t)) ||
+      (t.files||[]).some(f => (f.uris||[]).some(x => match(x.uri||""))));
   }
   const prog = t => (Number(t.completedLength)||0) / Math.max(1, Number(t.totalLength)||0);
   if (viewSort === "name") v.sort((a,b) => taskName(a).localeCompare(taskName(b)));
@@ -481,10 +515,13 @@ function render(tasks){
   $("#empty").style.display = tasks.length ? "none" : "block";
   const view = applyView(tasks);
   if (tasks.length && !view.length){
-    list.innerHTML = '<div class="empty">没有符合筛选条件的任务</div>';
+    let msg = "没有符合筛选条件的任务";
+    if (viewQuery) msg = "没有匹配「" + esc(viewQuery) + "」的任务（任务按文件名显示，可能与分享文案里的标题不同） <button onclick=\"clearSearch()\">清除搜索</button>";
+    else if (viewFilter !== "all") msg = "这个分类下暂时没有任务，切到「全部」看看";
+    list.innerHTML = '<div class="empty">' + msg + '</div>';
     return;
   }
-  list.innerHTML = view.map(t=>{
+  list.innerHTML = view.map(t=>{ try{
     const total = Number(t.totalLength)||0, done = Number(t.completedLength)||0;
     const pct = total ? Math.min(100, done/total*100) : 0;
     const speed = Number(t.downloadSpeed)||0;
@@ -523,7 +560,7 @@ function render(tasks){
       </div>${errMsg}
       <div class="bar"><i style="width:${pct}%"></i></div>
       </div><div class="acts">${acts}</div></div></div>`;
-  }).join("");
+  }catch(e){ return '<div class="task error"><div class="name">（这个任务显示出错）</div></div>'; } }).join("");
 }
 
 async function refresh(){
@@ -558,7 +595,8 @@ async function refresh(){
     if (__samples.length > 90) __samples.shift();
     drawChart();
     window.__anyActive = Number(gstat.numActive) > 0;
-    render([...(active||[]), ...(waiting||[]), ...(stopped||[])]);
+    try{ render([...(active||[]), ...(waiting||[]), ...(stopped||[])]); }
+    catch(e){ console.error("render failed", e); }
   }catch(e){ /* 下一轮再试 */ }
 }
 
@@ -895,6 +933,7 @@ $("#ftabs").addEventListener("click", e=>{
 });
 $("#q").addEventListener("input", e=>{
   viewQuery = e.target.value.trim();
+  $("#qClear").style.display = viewQuery ? "" : "none";
   if (window.__tasks) render(window.__tasks);
 });
 $("#sortSel").addEventListener("change", e=>{
@@ -1124,7 +1163,7 @@ function showSetGroup(name){
   $("#setHome").style.display = "none";
   $("#setPage").style.display = "";
   document.querySelectorAll(".set-group").forEach(g => { g.style.display = g.dataset.group === name ? "" : "none"; });
-  const titles = {download: "下载与限速", task: "任务默认", schedule: "定时计划", notify: "通知与分类", backup: "任务备份", appearance: "外观"};
+  const titles = {limits: "限速与并发", network: "连接与代理", bt: "BT 与做种", task: "任务默认", schedule: "定时计划", notify: "通知", android: "安卓策略", backup: "备份与数据", appearance: "外观"};
   $("#setTitle").textContent = titles[name] || "设置";
 }
 function showSetHome(){
