@@ -9,6 +9,8 @@ import android.os.Looper
 import android.webkit.WebView
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.Toast
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
@@ -36,6 +38,10 @@ class MainActivity : Activity() {
                 finish()
             }
         })
+        bar.addView(Button(this).apply {
+            text = "导出日志"
+            setOnClickListener { exportLogs() }
+        })
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -51,6 +57,36 @@ class MainActivity : Activity() {
             Diag.logError(this, "startForegroundService", t)
         }
         waitForServer(0)
+    }
+
+    /** Merge the shell startup log and the server's own diagnostics into one
+     * file in the download dir (fixed name, overwritten each time so exports
+     * never pile up), ready to be picked up with any file manager. */
+    private fun exportLogs() {
+        Toast.makeText(this, "正在导出日志…", Toast.LENGTH_SHORT).show()
+        thread {
+            val sb = StringBuilder()
+            sb.append("===== startup.log =====\n").append(Diag.read(this))
+            sb.append("\n===== server diagnostics =====\n")
+            try {
+                val c = URL("http://127.0.0.1:8077/api/log").openConnection() as HttpURLConnection
+                c.connectTimeout = 3000
+                c.readTimeout = 3000
+                sb.append(c.inputStream.bufferedReader().readText())
+                c.disconnect()
+            } catch (e: Exception) {
+                sb.append("(服务未运行，未能读取服务日志：${e.message})")
+            }
+            val extBase = getExternalFilesDir(null) ?: filesDir
+            val out = File(File(extBase, "ToFetch").apply { mkdirs() }, "tofetch-diagnostics.txt")
+            val msg = try {
+                out.writeText(sb.toString())
+                "日志已导出到下载目录：tofetch-diagnostics.txt"
+            } catch (e: Exception) {
+                "导出失败：${e.message}"
+            }
+            handler.post { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+        }
     }
 
     private fun waitForServer(tries: Int) {

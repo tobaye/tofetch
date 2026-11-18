@@ -23,7 +23,10 @@ object Diag {
         val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
         val f = File(base, "startup.log")
         try {
-            if (f.exists() && f.length() > 200_000) f.delete()
+            if (f.exists() && f.length() > 200_000) {
+                // Cap the log: keep only the most recent ~100KB.
+                f.writeText(f.readText().takeLast(100_000))
+            }
         } catch (e: Exception) {
         }
         logFile = f

@@ -188,6 +188,11 @@ def start_aria2() -> None:
         args.append(f"--ca-certificate={ca_bundle}")
     aria2_log = DATA_DIR / "aria2.log"
     try:
+        if aria2_log.exists() and aria2_log.stat().st_size > 1024 * 1024:
+            aria2_log.write_bytes(aria2_log.read_bytes()[-256 * 1024:])
+    except OSError:
+        pass
+    try:
         logf = aria2_log.open("ab")
     except OSError:
         logf = subprocess.DEVNULL
