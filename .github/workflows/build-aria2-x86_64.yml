@@ -100,6 +100,15 @@ jobs:
           curl -fsSL -o aria2.tar.xz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz
           tar xf aria2.tar.xz && cd aria2-1.37.0
           sed 's/aarch64/x86_64/g' android-config > android-config-x64
+          # NDK r26 no longer ships per-triple ar/as/ld/ranlib/strip;
+          # point the config at the unified LLVM tools instead.
+          sed -i \
+            -e "s|bin/x86_64-linux-android-ar|bin/llvm-ar|" \
+            -e "s|bin/x86_64-linux-android-as|bin/x86_64-linux-android29-clang|" \
+            -e "s|bin/x86_64-linux-android-ld|bin/ld.lld|" \
+            -e "s|bin/x86_64-linux-android-ranlib|bin/llvm-ranlib|" \
+            -e "s|bin/x86_64-linux-android-strip|bin/llvm-strip|" \
+            android-config-x64
           chmod +x android-config-x64
           ./android-config-x64
           make -j"$(nproc)"
