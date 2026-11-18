@@ -894,7 +894,7 @@ function detectDrive(text, links){
   }
   if (!found.length){ hint.style.display = "none"; hint.innerHTML = ""; return links; }
   const codeM = String(text || "").match(/(?:提取码|访问码|密码|口令)[:：=\s]*([A-Za-z0-9]{4,8})/);
-  const code = codeM ? codeM[1] : "";
+  const code = codeM && !/^https?$/i.test(codeM[1]) ? codeM[1] : "";
   const parts = [];
   for (const f of found){
     let note = "识别到" + f.d.name + "分享";
