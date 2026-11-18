@@ -105,7 +105,14 @@ qBittorrent / AriaNg），经 Mi 结合本产品立场筛选。定位判断与�
   build-aria2-x86_64.yml，官方 android-config 换架构＋统一 LLVM
   工具名；依赖实建为 zlib/openssl/c-ares/expat/libssh2，sqlite 按
   官方脚本口径不用）：产物 ELF x86-64 PIE、解释器 /system/bin/linker64，
-  sha256 a61420c52171d540…，存仓库 engines Release，build-apk 自动取用
+  存仓库 engines Release，build-apk 自动取用
+- 【2026-11-19 启动失败修复】首版引擎实测能执行但起不来：aria2 启动
+  加载 OpenSSL legacy provider 时只找得到模块文件、本包未带而退出
+  （Platform.cc）。修法：OpenSSL Configure 加 no-module＋enable-legacy，
+  legacy provider 静态编入 libcrypto（本地同配置实测 OSSL_PROVIDER_load
+  ("legacy") 无模块可用，工作流加 nm 符号守卫）；新产物 sha256
+  3855faf7cba77ce6…（7,854,744 字节），已替换 engines 资产并重打
+  v1.3.0 APK（版本号与签名不变，可覆盖安装），待云安卓复验引擎真起
 
 ### 本批不采纳/后置（测试侧原分档，Mi 附议）
 - 通知栏常驻快捷入口/桌面小部件「粘贴下载」：安卓侧可做，排 v1.3.0
