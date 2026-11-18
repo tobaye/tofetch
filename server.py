@@ -39,7 +39,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -584,6 +586,148 @@ def stop_aria2() -> None:
             _aria2_proc.kill()
 
 
+
+# ------------------------------------------------------- tasks export/import
+_EXPORT_KEYS = ["gid", "status", "dir", "files", "bittorrent"]
+
+
+def _task_export_entry(st):
+    uris = []
+    for f in st.get("files") or []:
+        for u in f.get("uris") or []:
+            uri = u.get("uri")
+            if uri and uri not in uris:
+                uris.append(uri)
+    bt = st.get("bittorrent") or {}
+    if bt.get("infoHash") and not any(u.startswith("magnet:") for u in uris):
+        uris.insert(0, "magnet:?xt=urn:btih:" + bt["infoHash"])
+    if not uris:
+        return None
+    entry = {"uris": uris}
+    try:
+        rel = Path(st.get("dir") or "").resolve().relative_to(DOWNLOAD_DIR)
+        if str(rel) not in (".", ""):
+            entry["dir"] = str(rel)
+    except Exception:
+        pass
+    return entry
+
+
+def collect_export_tasks():
+    """All non-complete tasks as portable {uris, dir} entries."""
+    tasks, seen = [], set()
+    for method, params in (("aria2.tellActive", []),
+                           ("aria2.tellWaiting", [0, 1000]),
+                           ("aria2.tellStopped", [0, 1000])):
+        try:
+            resp = rpc_call(method, params + [_EXPORT_KEYS], timeout=10)
+        except Exception:
+            continue
+        for st in resp.get("result") or []:
+            if st.get("status") == "complete" or st.get("gid") in seen:
+                continue
+            seen.add(st.get("gid"))
+            entry = _task_export_entry(st)
+            if entry:
+                tasks.append(entry)
+    return tasks
+
+
+def import_tasks(items):
+    added, skipped, gids = 0, 0, []
+    for item in items[:200]:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        uris = [u for u in (item.get("uris") or [])
+                if isinstance(u, str) and u.strip()]
+        if not uris:
+            skipped += 1
+            continue
+        options = {}
+        sub = str(item.get("dir") or "").strip()
+        if sub:
+            target = (DOWNLOAD_DIR / sub).resolve()
+            try:
+                target.relative_to(DOWNLOAD_DIR)
+                options["dir"] = str(target)
+            except Exception:
+                pass  # a dir outside the download root is dropped, not fatal
+        extra = item.get("options")
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k in ADD_OPT_KEYS:
+                    options[k] = v
+        try:
+            resp = rpc_call("aria2.addUri", [uris, with_task_defaults(options)])
+            if isinstance(resp, dict) and resp.get("error"):
+                skipped += 1
+                continue
+            added += 1
+            gids.append(resp.get("result"))
+        except Exception:
+            skipped += 1
+    if added:
+        try:
+            rpc_call("aria2.saveSession", [], timeout=3)
+        except Exception:
+            pass
+    return added, skipped, gids
+
+
+# ------------------------------------------------------------- link probing
+_PROBE_UA = "Mozilla/5.0 (compatible; ToFetch probe)"
+
+
+def _filename_from_cd(cd):
+    import re as _re
+    m = _re.search(r"filename\*=UTF-8''([^;]+)", cd or "")
+    if m:
+        return unquote(m.group(1)).strip().strip('"')
+    m = _re.search(r'filename="?([^";]+)"?', cd or "")
+    return m.group(1).strip() if m else ""
+
+
+def _probe_one(url):
+    out = {"url": url, "ok": False, "status": 0, "size": 0,
+           "name": "", "error": ""}
+    if not url.startswith(("http://", "https://")):
+        out["error"] = "unsupported scheme"
+        return out
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(
+                url, method=method, headers={"User-Agent": _PROBE_UA})
+            if method == "GET":
+                req.add_header("Range", "bytes=0-0")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                out["status"] = resp.status
+                out["ok"] = 200 <= resp.status < 400
+                out["name"] = _filename_from_cd(
+                    resp.headers.get("Content-Disposition") or "")
+                cr = resp.headers.get("Content-Range") or ""
+                tail = cr.rsplit("/", 1)[-1] if "/" in cr else ""
+                if tail.isdigit():
+                    out["size"] = int(tail)
+                elif method == "HEAD":
+                    cl = resp.headers.get("Content-Length") or ""
+                    if cl.isdigit():
+                        out["size"] = int(cl)
+                return out
+        except urllib.error.HTTPError as e:
+            out["status"] = e.code
+            if e.code in (405, 501) and method == "HEAD":
+                continue
+            out["error"] = f"HTTP {e.code}"
+            return out
+        except Exception as e:
+            if method == "HEAD":
+                continue
+            out["error"] = str(e)[:120]
+            return out
+    return out
+
+
 # ------------------------------------------------------------------- the app
 
 ALLOWED_METHODS = {
@@ -597,7 +741,7 @@ ALLOWED_METHODS = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.1.0"
+    server_version = "ToFetch/1.2.0"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
@@ -671,6 +815,21 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._need_auth()
             return self._json(200, {"entries": load_history()})
+        if path == "/api/export":
+            if not self._authed():
+                return self._need_auth()
+            payload = {"app": "tofetch", "version": 1,
+                       "exported_at": int(time.time()),
+                       "tasks": collect_export_tasks()}
+            body = json.dumps(payload, ensure_ascii=False, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             "attachment; filename=tofetch-tasks.json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/log":
             if not self._authed():
                 return self._need_auth()
@@ -776,6 +935,25 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
             return self._json(200, {"ok": True})
+        if path == "/api/import":
+            body = self._read_json()
+            items = body.get("tasks")
+            if not isinstance(items, list):
+                return self._json(HTTPStatus.BAD_REQUEST,
+                                  {"error": "tasks list required"})
+            added, skipped, gids = import_tasks(items)
+            return self._json(200, {"added": added, "skipped": skipped,
+                                    "gids": gids})
+        if path == "/api/probe":
+            body = self._read_json()
+            urls = body.get("urls")
+            if not isinstance(urls, list) or not urls:
+                return self._json(HTTPStatus.BAD_REQUEST,
+                                  {"error": "urls required"})
+            urls = [str(u) for u in urls[:20]]
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                results = list(ex.map(_probe_one, urls))
+            return self._json(200, {"results": results})
         if path == "/api/remove-files":
             return self._remove_files()
         if path == "/api/rpc":

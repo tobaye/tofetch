@@ -107,8 +107,22 @@ class RangeHandler(BaseHTTPRequestHandler):
             pass  # aria2 drops range connections routinely; not an error here
 
 
+    def do_HEAD(self):
+        p = self.root / self.path.lstrip("/")
+        if not p.is_file():
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(p.stat().st_size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+
+
 class QuietServer(ThreadingHTTPServer):
     daemon_threads = True
+    # aria2 opens many parallel ranged connections; the default backlog
+    # of 5 can drop loopback connects late in a long suite run.
+    request_queue_size = 128
 
     def handle_error(self, request, client_address):
         pass
@@ -246,6 +260,68 @@ def main() -> int:
             fetched = r.read()
         ok = ok and hashlib.sha256(fetched).hexdigest() == small_hash
         report("T1 download completes byte-exact + fetch-back", ok)
+
+        # T14 export/import: an unfinished task survives the round-trip
+        work14 = Path(tempfile.mkdtemp(prefix="tofetch-test14-"))
+        td14 = ToFetch(work14, aria2, free_port(), free_port())
+        try:
+            td14.wait_engine()
+            td14.rpc("changeGlobalOption", [{"max-overall-download-limit": "200K"}])
+            gid14 = td14.rpc("addUri", [[f"{base}/big.bin"], {"out": "exp.bin"}])
+            time.sleep(2)
+            with urllib.request.urlopen(td14.ui + "/api/export", timeout=10) as r:
+                export = json.loads(r.read().decode())
+            tasks14 = export.get("tasks") or []
+            has14 = any(any("big.bin" in u for u in t.get("uris", []))
+                        for t in tasks14)
+            td14.rpc("remove", [gid14, True])
+            res14 = td14.api("/api/import", {"tasks": tasks14})
+            ok14 = has14 and res14.get("added", 0) >= 1 and bool(res14.get("gids"))
+            if ok14:
+                st14 = td14.status(res14["gids"][0])
+                ok14 = st14["status"] in ("active", "waiting", "paused")
+            report("T14 export/import round-trips an unfinished task", ok14,
+                   f"(exported={len(tasks14)}, added={res14.get('added')})")
+        finally:
+            td14.stop()
+            shutil.rmtree(work14, ignore_errors=True)
+
+        # T15 probe: live file reports its size, 404 is flagged, magnet refused
+        work15 = Path(tempfile.mkdtemp(prefix="tofetch-test15-"))
+        td15 = ToFetch(work15, aria2, free_port(), free_port())
+        try:
+            td15.wait_engine()
+            res15 = td15.api("/api/probe", {"urls": [
+                f"{base}/small.bin", f"{base}/nope.bin", "magnet:?xt=urn:btih:abc"]},
+                timeout=60)
+            by_url = {r["url"]: r for r in res15.get("results", [])}
+            live = by_url.get(f"{base}/small.bin", {})
+            dead = by_url.get(f"{base}/nope.bin", {})
+            mag = by_url.get("magnet:?xt=urn:btih:abc", {})
+            ok15 = (live.get("ok") and live.get("size") == 1024 * 1024
+                    and not dead.get("ok") and dead.get("status") == 404
+                    and not mag.get("ok"))
+            report("T15 probe: live size, 404 flagged, magnet unsupported", ok15,
+                   f"(live={live.get('ok')}/{live.get('size')}/{live.get('error')}, "
+                   f"dead={dead.get('status')}/{dead.get('error')}, mag={mag.get('error')})")
+        finally:
+            td15.stop()
+            shutil.rmtree(work15, ignore_errors=True)
+
+        # T16 multi-source: dead first URI + live second URI still completes
+        work16 = Path(tempfile.mkdtemp(prefix="tofetch-test16-"))
+        td16 = ToFetch(work16, aria2, free_port(), free_port())
+        try:
+            td16.wait_engine()
+            gid16 = td16.rpc("addUri", [[f"{base}/missing.bin", f"{base}/small.bin"],
+                                        {"out": "multi.bin"}])
+            td16.wait_complete(gid16, 45)
+            ok16 = sha256(work16 / "downloads" / "multi.bin") == small_hash
+            report("T16 multi-source failover completes byte-exact", ok16)
+        finally:
+            td16.stop()
+            shutil.rmtree(work16, ignore_errors=True)
+
 
         # T2 pause freezes, resume finishes (throttled so it stays in flight)
         td.rpc("changeGlobalOption", [{"max-overall-download-limit": "3M"}])

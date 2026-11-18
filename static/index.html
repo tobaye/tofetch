@@ -148,6 +148,12 @@
   <label>链接（每行一个；也可以把整段文字粘进来，会自动提取其中的下载链接。支持 HTTP / FTP / 磁力 / ed2k / 迅雷 / .m3u8）</label>
   <textarea id="addUrls" placeholder="https://example.com/file.zip&#10;magnet:?xt=urn:btih:...&#10;也可以直接粘贴一整段文字，自动提取里面的链接"></textarea>
   <p class="hint" id="addHint"></p>
+  <p class="hint" id="driveHint" style="display:none"></p>
+  <div style="display:flex;gap:8px;margin:2px 0 6px">
+    <button onclick="probeLinks()">测活（查链接可用性）</button>
+    <button id="killDeadBtn" onclick="removeDead()" style="display:none">移除死链</button>
+  </div>
+  <div id="probeBox"></div>
   <label>或选择种子文件（.torrent）</label>
   <input type="file" id="addTorrent" accept=".torrent">
   <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
@@ -169,6 +175,8 @@
     <input type="text" id="advRef" placeholder="留空不带">
     <label>自定义请求头（每行一个，格式：名称: 值）</label>
     <textarea id="advHeaders" style="min-height:56px" placeholder="Cookie: session=xxx"></textarea>
+    <label>备用链接（每行一个，须与主链接是同一文件的镜像；主源卡死时自动切换。仅添加单个链接时生效）</label>
+    <textarea id="advBackup" style="min-height:56px" placeholder="https://mirror.example.com/file.zip"></textarea>
     <label>校验和（可选，下载完自动核对，不符会报错）</label>
     <div style="display:flex;gap:8px">
       <select id="advCkType" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px">
@@ -236,6 +244,12 @@
   <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
     <input type="checkbox" id="prefNotify" style="width:auto;margin:0"> 下载完成时弹浏览器通知
   </label>
+  <label>任务备份（换机 / 重装时迁移未完成任务）</label>
+  <div style="display:flex;gap:8px">
+    <button onclick="exportTasks()">导出任务</button>
+    <button onclick="$('#importFile').click()">导入任务</button>
+    <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importTasks(event)">
+  </div>
   <p class="hint">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
   <div class="dlg-btns">
     <button onclick="setDlg.close()">取消</button>
@@ -424,7 +438,8 @@ function render(tasks){
     acts += `<button class="danger" onclick="openDelete('${t.gid}')">删除</button>`;
     const href = t.status==="complete" ? taskFileHref(t) : null;
     if (href) acts += `<a href="${esc(href)}"><button>取回文件</button></a>`;
-    const errMsg = t.errorMessage ? `<div class="meta" style="color:var(--err)">${esc(t.errorMessage)}</div>` : "";
+    const fe = t.errorMessage ? friendlyError(t.errorMessage) : null;
+    const errMsg = fe ? `<div class="meta" style="color:var(--err)">${esc(fe.t)}</div><div class="meta">${esc(fe.tip)}</div>` : "";
     return `<div class="task ${cls}"><div class="row"><div class="grow">
       <div class="name">${esc(taskName(t))}</div>
       <div class="meta">
@@ -657,7 +672,7 @@ async function openDetail(gid, silent){
       ["连接 / 种子", String(t.connections || 0) + " / " + String(t.numSeeders || 0)],
     ];
     if (t.infoHash) rows.push(["InfoHash", t.infoHash]);
-    if (t.errorMessage) rows.push(["错误", t.errorMessage]);
+    if (t.errorMessage){ const fe = friendlyError(t.errorMessage); rows.push(["错误", fe.t]); rows.push(["建议", fe.tip]); rows.push(["引擎原文", t.errorMessage]); }
     if ((t.files || []).length > 1)
       rows.push(["文件", t.files.map(f => (f.path || "").split("/").pop() + "（" + fmtBytes(f.length) + "）").join("\n")]);
     $("#detailBody").innerHTML = rows.filter(r => r[1])
@@ -833,12 +848,136 @@ function openAdd(){
   for (const id of ["#advLimit","#advConn","#advSplit","#advUa","#advRef","#advHeaders","#advCkVal"]) $(id).value = "";
   $("#advCkType").value = "";
   $("#addPauseTorrent").checked = false;
+  $("#advBackup").value = ""; $("#probeBox").innerHTML = "";
+  $("#killDeadBtn").style.display = "none"; $("#driveHint").style.display = "none";
   addDlg.showModal();
 }
+// ---- v1.2.0 additions: friendly errors, drive-share recognition,
+// ---- link probing, task export/import, multi-source backups.
+function friendlyError(msg){
+  const m = String(msg || "");
+  const rules = [
+    [/stalled|timed?\s?out|timeout/i, "连接卡死或超时", "网络不稳或源站无响应；可等自动重试，或用「换链接重试」"],
+    [/could not resolve|resolve host|getaddrinfo|name or service|dns/i, "域名解析失败", "检查网络连接，或稍后再试"],
+    [/certificate|ssl|tls|handshake/i, "证书校验失败", "源站证书异常（过期 / 自签 / 域名不符），建议换链接"],
+    [/404/, "文件不存在（404）", "链接已失效，请换链接"],
+    [/403/, "服务器拒绝访问（403）", "可能有防盗链：在高级选项里补 Referer / User-Agent 再试"],
+    [/401/, "需要登录授权（401）", "该链接需要账号凭据，无法直接下载"],
+    [/429|too many requests/i, "被源站限流（429）", "稍后再试，或调低连接数"],
+    [/no space|disk.{0,12}full|not enough space/i, "磁盘空间不足", "清理下载目录空间后重试"],
+    [/refused|unreachable|connection reset/i, "连不上源站", "检查网络，或源站已下线"],
+    [/50[0-9]/, "源站服务器错误", "对方服务器故障，稍后重试"],
+    [/not found/i, "资源不存在", "链接可能已失效，请换链接"]
+  ];
+  for (const r of rules) if (r[0].test(m)) return {t: r[1], tip: r[2]};
+  return {t: m, tip: "可尝试「重试」或「换链接重试」"};
+}
+
+const DRIVES = [
+  {key: "baidu", name: "百度网盘", re: /pan\.baidu\.com\/s\/[A-Za-z0-9_-]+/},
+  {key: "quark", name: "夸克网盘", re: /pan\.quark\.cn\/s\/[A-Za-z0-9]+/},
+  {key: "aliyun", name: "阿里云盘", re: /(aliyundrive|alipan)\.com\/s\/[A-Za-z0-9_-]+/},
+  {key: "pan123", name: "123云盘", re: /(123pan|123684|123865)\.com\/s\/[A-Za-z0-9_-]+/},
+  {key: "lanzou", name: "蓝奏云", re: /lanzou[a-z]?\.com\/[A-Za-z0-9]+/}
+];
+function detectDrive(text, links){
+  const hint = $("#driveHint");
+  if (!hint) return links;
+  const found = [];
+  for (const d of DRIVES){
+    const hit = links.find(u => d.re.test(u));
+    if (hit) found.push({d, link: hit});
+  }
+  if (!found.length){ hint.style.display = "none"; hint.innerHTML = ""; return links; }
+  const codeM = String(text || "").match(/(?:提取码|访问码|密码|口令)[:：=\s]*([A-Za-z0-9]{4,8})/);
+  const code = codeM ? codeM[1] : "";
+  const parts = [];
+  for (const f of found){
+    let note = "识别到" + f.d.name + "分享";
+    if (code){
+      note += "，提取码 " + code;
+      if (f.d.key === "baidu"){
+        const idx = links.indexOf(f.link);
+        if (idx >= 0 && !/[?&]pwd=/.test(f.link)){
+          links[idx] = f.link + (f.link.includes("?") ? "&" : "?") + "pwd=" + code;
+          note += "（已自动带入链接）";
+        }
+      }
+    }
+    parts.push(note);
+  }
+  hint.style.display = "";
+  hint.innerHTML = esc(parts.join("；")) +
+    (code ? " <button onclick=\"copyText('" + code + "')\">复制提取码</button>" : "") +
+    "<br>提示：网盘文件需先在网盘页打开 / 转存，ToFetch 不能直下网盘内文件；提取码用于打开分享页。";
+  return links;
+}
+function copyText(t){
+  if (navigator.clipboard) navigator.clipboard.writeText(t);
+}
+
+function collectBackups(){
+  const el = $("#advBackup");
+  if (!el) return [];
+  return el.value.split(/\r?\n/).map(s => s.trim())
+    .filter(u => /^(https?|ftp):\/\//i.test(u));
+}
+
+window.__deadUrls = [];
+async function probeLinks(){
+  applyExtract();
+  const urls = $("#addUrls").value.split(/\r?\n/).map(s => s.trim())
+    .filter(u => /^https?:\/\//i.test(u));
+  const box = $("#probeBox");
+  if (!urls.length){ box.innerHTML = "<p class='hint'>没有可测的 http(s) 链接</p>"; return; }
+  box.innerHTML = "<p class='hint'>测活中…</p>";
+  try{
+    const r = await api("/api/probe", {urls});
+    window.__deadUrls = r.results.filter(x => !x.ok).map(x => x.url);
+    box.innerHTML = r.results.map(x => {
+      if (x.ok){
+        const nm = x.name || x.url;
+        return "<div class='meta'>✓ " + esc(nm) + (x.size ? " · " + fmtBytes(x.size) : "") + "</div>";
+      }
+      return "<div class='meta' style='color:var(--err)'>✗ " + esc(x.url) + "（" +
+        esc(x.error || ("HTTP " + x.status)) + "）</div>";
+    }).join("");
+    $("#killDeadBtn").style.display = window.__deadUrls.length ? "" : "none";
+  }catch(e){ box.innerHTML = "<p class='hint'>测活失败：" + esc(e.message) + "</p>"; }
+}
+function removeDead(){
+  const dead = new Set(window.__deadUrls);
+  const ta = $("#addUrls");
+  ta.value = ta.value.split(/\r?\n/).filter(l => !dead.has(l.trim())).join("\n");
+  $("#killDeadBtn").style.display = "none";
+  $("#probeBox").innerHTML = "<p class='hint'>已移除 " + dead.size + " 条死链</p>";
+}
+
+function exportTasks(){
+  const a = document.createElement("a");
+  a.href = "/api/export";
+  a.download = "tofetch-tasks.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+async function importTasks(ev){
+  const f = ev.target.files[0];
+  if (!f) return;
+  try{
+    const data = JSON.parse(await f.text());
+    const r = await api("/api/import", {tasks: data.tasks || []});
+    alert("导入完成：新增 " + r.added + " 个，跳过 " + r.skipped + " 个");
+    setDlg.close();
+    refresh();
+  }catch(e){ alert("导入失败：" + e.message); }
+  ev.target.value = "";
+}
+
 // 粘贴时就提取：把整段文字换成识别出的链接清单，省得用户自己挑。
 function applyExtract(){
   const ta = $("#addUrls");
-  const links = extractLinks(ta.value);
+  const links = detectDrive(ta.value, extractLinks(ta.value));
   if (links.length && links.join("\n") !== ta.value.trim()){
     ta.value = links.join("\n");
     $("#addHint").textContent = "已从粘贴内容中识别出 " + links.length + " 条下载链接";
@@ -871,6 +1010,7 @@ async function submitAdd(){
     const found = extractLinks(raw);
     let urls = (found.length ? found : raw.split(/\r?\n/)).map(normalizeUrl).filter(Boolean);
     urls = [...new Set(urls.flatMap(expandWildcard))];
+    window.__backups = collectBackups();
     const known = knownUris();
     const dupes = urls.filter(u => known.has(u));
     if (dupes.length && !confirm("这些链接已在任务列表里：\n" + dupes.join("\n") + "\n\n点「确定」跳过它们、只加新的；点「取消」回到编辑。")){
@@ -883,7 +1023,9 @@ async function submitAdd(){
         const cat = categoryFor(u);
         if (cat) o = Object.assign({}, opts, {dir: (window.__dlDir||"") + "/" + cat});
       }
-      await rpc("addUri", [[u], o]);
+      const group = (urls.length === 1 && window.__backups && window.__backups.length)
+        ? [u].concat(window.__backups.filter(b => b !== u)) : [u];
+      await rpc("addUri", [group, o]);
     }
     addDlg.close(); refresh();
   }catch(e){ alert("添加失败：" + e.message); }
