@@ -101,6 +101,11 @@ qBittorrent / AriaNg），经 Mi 结合本产品立场筛选。定位判断与�
 - 不采用：Termux 仓库的 aria2 包（二进制按 Termux 前缀路径链接，
   塞进 APK 需改解释器/RPATH，且版本与来源不可控）；从第三方 APK
   提取二进制（来源与再分发口径不清）
+- 【2026-11-18 v1.3.0 已完成】NDK r26d 自编成功（工作流
+  build-aria2-x86_64.yml，官方 android-config 换架构＋统一 LLVM
+  工具名；依赖实建为 zlib/openssl/c-ares/expat/libssh2，sqlite 按
+  官方脚本口径不用）：产物 ELF x86-64 PIE、解释器 /system/bin/linker64，
+  sha256 a61420c52171d540…，存仓库 engines Release，build-apk 自动取用
 
 ### 本批不采纳/后置（测试侧原分档，Mi 附议）
 - 通知栏常驻快捷入口/桌面小部件「粘贴下载」：安卓侧可做，排 v1.3.0
@@ -113,6 +118,29 @@ qBittorrent / AriaNg），经 Mi 结合本产品立场筛选。定位判断与�
 - 远程实例（安卓端切换控制服务器版）：需求未证实，维持长期观察
 - RSS 订阅下载、自建浏览器内核、网盘账号直连：不做（见「明确不做」）
 
+## v1.3.0 合并批（2026-11-18 已完成并发版，回归 21/21，versionCode 18）
+- 服务端：安全批收官（dir 全局钳制 T20、请求体上限 413 T21、cookie 按
+  实际协议加 Secure）；统计落盘 data/stats.json＋GET /api/stats（T18，
+  按 gid 防重复计数）；设置导入/导出（T19）；changePosition 放行（T17）
+- 界面：设置抽屉化两级（下载与限速/任务默认/定时计划/通知与分类/
+  任务备份/外观）；网盘链接提交时拦截确认（全网盘默认拦、混合三选）；
+  队列置顶/上移/下移；主题色预设＋紧凑密度（localStorage）
+- 安卓：通知「添加下载」动作（剪贴板注入添加框）；策略三件套
+  wifi_only / low_batt_pause / seed_charging（只恢复本服务暂停的任务，
+  不误伤手动暂停）；通知栏常驻快捷入口即此动作，桌面小部件未做
+- 固定签名：永久 PKCS12 keystore（.signing/ 0600＋GitHub Secrets），
+  APK 改 release 签名，证书 SHA-256 指纹 DA:99:2C:C7:B5:07:61:BE:…A6:5C；
+  装 1.3.0 仍需最后卸载一次，之后覆盖安装
+- 浏览器扩展 ToFetch Connect（extension/，右键/拦截下载，带 Cookie/
+  Referer），zip 随 Release 发布
+- 本地包应用化：Windows magnet/.torrent 关联＋可选自启（注册/取消
+  .bat＋tofetch-open.py），Linux .desktop＋tofetch-open.sh；打包脚本
+  scripts/build_packages.py 入库，CI 组装三包＋扩展直接挂 Release
+- Docker：镜像 CI 推 ghcr.io/tobaye/tofetch（:v1.3.0＋:latest）
+- x86_64 引擎：NDK 自编真包已换入（见口碑批一节专项记录）
+- 发布形态：Release v1.3.0 资产含 APK＋三包 zip＋扩展 zip（CI 挂载）；
+  v1.2.0 的 APK 附件已按留存规则删除；woiden 服务器版已升级实测
+
 ## 1.1 之后的方向（2026-11-18 整理，对标三家的剩余差距）
 批①②齐后发 v1.1.0（四版同升）。之后原 1.2 与 1.3 两段经用户拍板
 **合并为一批**（2026-11-18），做完回归全绿、四版同发一个版本号；
@@ -121,7 +149,7 @@ qBittorrent / AriaNg），经 Mi 结合本产品立场筛选。定位判断与�
 本合并批顺延为 v1.3.0；任务导入/导出已提前到口碑批，设置导入/导出
 仍留本批。】
 
-### 下一批（v1.3.0，原 1.2＋1.3 合并）
+### 下一批（v1.3.0，原 1.2＋1.3 合并）【已完成，见上方 v1.3.0 节】
 - **浏览器扩展 ToFetch Connect**：三家都有的最后一块大拼图。扩展把
   浏览器下载拦截/右键菜单的链接连同 Cookie、Referer 送进 ToFetch
   （本机版或服务器版，扩展里填地址＋密码）；核心仍零依赖，扩展是
@@ -181,12 +209,18 @@ qBittorrent / AriaNg），经 Mi 结合本产品立场筛选。定位判断与�
   网关口径）——【v1.0.1 已插队完成】down.puke.eu.org 已公网可达，此项
   最优先；经代理时只信任回环来源的 CF-Connecting-IP / X-Forwarded-For
 - addUri / addTorrent 的 dir 参数钳制在下载目录内（与 /files/ 检查对齐）
-- _read_json 加请求体大小上限
+  ——【v1.3.0 已完成，全入口 clamp_dir，回归 T20】
+- _read_json 加请求体大小上限——【v1.3.0 已完成，JSON 2MB／种子 64MB，
+  超限 413，回归 T21】
 - 会话 cookie 按请求实际协议加 Secure（HTTPS/隧道场景；本地 http 形态
-  不能无条件加，否则本机登录丢 cookie）
+  不能无条件加，否则本机登录丢 cookie）——【v1.3.0 已完成，
+  X-Forwarded-Proto: https 时加 Secure，woiden 实测通过】
 - 打包保留执行位：Linux tofetch.sh、安卓 install.sh 与引擎现为 0660，
   打包时带 x 位，省掉解压后 chmod +x 一步（说明里的提示保留作兜底）
+  ——【v1.3.0 已完成，build_packages.py 写 0755】
 - APK release 签名规划：换签名需卸载重装，提前定数据迁移说法
+  ——【v1.3.0 已完成，永久 keystore release 签名；Release 说明已写明
+  本版需最后卸载一次、之后覆盖安装】
 
 ## 下一批·功能（易做、收益高）
 - **粘贴自动提取下载链接（2026-11-18 用户点名，四版一起加）**：添加任务时
