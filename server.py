@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from http import HTTPStatus
@@ -93,7 +94,7 @@ TASK_OPT_KEYS = {"max-tries", "retry-wait"}
 ADD_OPT_KEYS = {
     "split", "max-connection-per-server", "max-download-limit",
     "user-agent", "referer", "header", "max-tries", "retry-wait",
-    "all-proxy", "checksum",
+    "all-proxy", "checksum", "pause",
 }
 
 
@@ -102,12 +103,17 @@ def load_settings() -> dict:
         raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
         raw = {}
-    out = {"global": {}, "task": {}}
+    out = {"global": {}, "task": {}, "schedule": {}, "prefs": {}}
     if isinstance(raw, dict):
         for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
             vals = raw.get(group)
             if isinstance(vals, dict):
                 out[group] = {k: str(v) for k, v in vals.items() if k in keys}
+        if isinstance(raw.get("schedule"), dict):
+            out["schedule"] = raw["schedule"]
+        if isinstance(raw.get("prefs"), dict):
+            out["prefs"] = {k: v for k, v in raw["prefs"].items()
+                            if isinstance(v, (str, bool, int, float)) and len(str(v)) <= 500}
     return out
 
 
@@ -116,6 +122,52 @@ def save_settings(settings: dict) -> None:
     tmp = SETTINGS_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(SETTINGS_PATH)
+
+
+def _clean_schedule(sched: dict):
+    """Validate a schedule dict from the client; None means reject."""
+    import re as _re
+    hhmm = _re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+    out = {}
+    windows = sched.get("speed_windows")
+    if windows:
+        if not isinstance(windows, list) or len(windows) > 8:
+            return None
+        cleaned_windows = []
+        for w in windows:
+            if not isinstance(w, dict):
+                return None
+            frm, to = str(w.get("from", "")), str(w.get("to", ""))
+            if not (hhmm.match(frm) and hhmm.match(to)):
+                return None
+            try:
+                down = int(w.get("down", 0))
+                up = int(w.get("up", 0))
+            except (TypeError, ValueError):
+                return None
+            if not (0 <= down <= 10 ** 6 and 0 <= up <= 10 ** 6):
+                return None
+            cleaned_windows.append({"from": frm, "to": to, "down": down, "up": up})
+        out["speed_windows"] = cleaned_windows
+    for key in ("pause_at", "resume_at"):
+        v = str(sched.get(key, "")).strip()
+        if v:
+            if not hhmm.match(v):
+                return None
+            out[key] = v
+    url = str(sched.get("tracker_url", "")).strip()
+    if url:
+        if len(url) > 500 or not url.startswith(("http://", "https://")):
+            return None
+        out["tracker_url"] = url
+        try:
+            hours = float(sched.get("tracker_hours") or 24)
+        except (TypeError, ValueError):
+            return None
+        if not (1 <= hours <= 168):
+            return None
+        out["tracker_hours"] = hours
+    return out
 
 
 def _valid_setting(key: str, value: str) -> bool:
@@ -229,6 +281,211 @@ def with_task_defaults(options: dict) -> dict:
     return merged
 
 
+# -------------------------------------------------------------- history
+# Finished/failed tasks are harvested from tellStopped responses (the UI
+# polls them anyway) into a persistent history file, so the record of what
+# was downloaded survives restarts and removeDownloadResult.
+HISTORY_PATH = DATA_DIR / "history.json"
+HISTORY_CAP = 500
+_history_lock = threading.Lock()
+
+
+def _task_display_name(task: dict) -> str:
+    bt = task.get("bittorrent") or {}
+    info = bt.get("info") or {}
+    if info.get("name"):
+        return str(info["name"])
+    files = task.get("files") or []
+    if files:
+        p = files[0].get("path") or ""
+        if p:
+            return p.rsplit("/", 1)[-1]
+        uris = files[0].get("uris") or []
+        if uris:
+            return str(uris[0].get("uri", ""))
+    return ""
+
+
+def _record_history(tasks) -> None:
+    fresh = []
+    for t in tasks or []:
+        if not isinstance(t, dict):
+            continue
+        if t.get("status") not in ("complete", "error", "removed"):
+            continue
+        gid = t.get("gid")
+        if not gid:
+            continue
+        files = t.get("files") or []
+        fresh.append({
+            "gid": gid,
+            "name": _task_display_name(t),
+            "status": t.get("status"),
+            "total": int(t.get("totalLength") or 0),
+            "done": int(t.get("completedLength") or 0),
+            "dir": t.get("dir", ""),
+            "path": (files[0].get("path") if files else "") or "",
+            "error": t.get("errorMessage", ""),
+            "at": int(time.time()),
+        })
+    if not fresh:
+        return
+    with _history_lock:
+        try:
+            entries = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            if not isinstance(entries, list):
+                entries = []
+        except Exception:
+            entries = []
+        known = {e.get("gid") for e in entries}
+        add = [e for e in fresh if e["gid"] not in known]
+        if not add:
+            return
+        entries = (add + entries)[:HISTORY_CAP]
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = HISTORY_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(HISTORY_PATH)
+        except OSError:
+            pass
+    _fire_webhooks(add)
+
+
+def _fire_webhooks(entries) -> None:
+    """POST newly finished/failed tasks to the user's webhook URL, if set."""
+    url = str(load_settings().get("prefs", {}).get("webhook_url", "")).strip()
+    if not url or not entries:
+        return
+
+    def send(entry):
+        try:
+            payload = json.dumps({
+                "event": entry.get("status"), "name": entry.get("name"),
+                "total": entry.get("total"), "path": entry.get("path"),
+                "gid": entry.get("gid"), "at": entry.get("at"),
+            }).encode()
+            req = urllib.request.Request(url, data=payload,
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception:
+            pass
+
+    for e in entries:
+        threading.Thread(target=send, args=(e,), daemon=True).start()
+
+
+def _harvest_history(node) -> None:
+    """Walk an RPC result structure; record any terminal tasks found."""
+    if isinstance(node, dict):
+        if "gid" in node and "status" in node:
+            _record_history([node])
+        for v in node.values():
+            _harvest_history(v)
+    elif isinstance(node, list):
+        for v in node:
+            _harvest_history(v)
+
+
+def load_history() -> list:
+    try:
+        entries = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        return []
+
+
+# ------------------------------------------------------------ scheduler
+# One daemon thread drives the time-based features from the persisted
+# schedule settings: speed-limit windows, daily pause/resume, and
+# tracker-list refresh from a URL.
+_sched_state = {"window_active": False, "fired": {}, "tracker_last": 0.0}
+
+
+def _in_window(hhmm: str, start: str, end: str) -> bool:
+    if not (start and end):
+        return False
+    if start <= end:
+        return start <= hhmm < end
+    return hhmm >= start or hhmm < end  # window wraps midnight
+
+
+def _scheduler_tick() -> None:
+    if not rpc_alive():
+        return
+    sched = load_settings().get("schedule") or {}
+    hhmm = time.strftime("%H:%M")
+    active = None
+    for w in sched.get("speed_windows") or []:
+        if isinstance(w, dict) and _in_window(hhmm, str(w.get("from", "")), str(w.get("to", ""))):
+            active = w
+            break
+    if active and not _sched_state["window_active"]:
+        try:
+            rpc_call("aria2.changeGlobalOption", [{
+                "max-overall-download-limit": str(int(active.get("down", 0)) * 1024),
+                "max-overall-upload-limit": str(int(active.get("up", 0)) * 1024),
+            }], timeout=5)
+            _sched_state["window_active"] = True
+            log_event(f"speed window {active.get('from')}–{active.get('to')} entered")
+        except Exception:
+            pass
+    elif not active and _sched_state["window_active"]:
+        restore = dict(load_settings()["global"])
+        restore.setdefault("max-overall-download-limit", "0")
+        restore.setdefault("max-overall-upload-limit", "0")
+        try:
+            rpc_call("aria2.changeGlobalOption", [restore], timeout=5)
+        except Exception:
+            pass
+        _sched_state["window_active"] = False
+        log_event("speed window left, saved limits restored")
+    today = time.strftime("%Y-%m-%d")
+    for key, method in (("pause_at", "aria2.pauseAll"), ("resume_at", "aria2.unpauseAll")):
+        at = sched.get(key)
+        if at and hhmm >= str(at) and _sched_state["fired"].get(key) != today:
+            try:
+                rpc_call(method, [], timeout=5)
+                _sched_state["fired"][key] = today
+                log_event(f"scheduled {key} fired at {hhmm}")
+            except Exception:
+                pass
+    url = sched.get("tracker_url")
+    if url:
+        try:
+            hours = float(sched.get("tracker_hours") or 24)
+        except (TypeError, ValueError):
+            hours = 24.0
+        if time.time() - _sched_state["tracker_last"] > hours * 3600:
+            _sched_state["tracker_last"] = time.time()
+            try:
+                req = urllib.request.Request(str(url), headers={"User-Agent": "ToFetch"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    text = r.read().decode(errors="replace")
+                trackers = ",".join(x.strip() for x in text.replace("\r", "\n").replace("\n", ",").split(",") if x.strip())
+                if trackers:
+                    settings = load_settings()
+                    settings["global"]["bt-tracker"] = trackers
+                    save_settings(settings)
+                    rpc_call("aria2.changeGlobalOption", [{"bt-tracker": trackers}], timeout=5)
+                    log_event("tracker list refreshed from URL")
+            except Exception:
+                pass
+
+
+def _scheduler_loop() -> None:
+    try:
+        tick = float(os.environ.get("TOFETCH_SCHED_TICK", "20"))
+    except ValueError:
+        tick = 20.0
+    while True:
+        time.sleep(max(1.0, tick))
+        try:
+            _scheduler_tick()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- aria2 child
 
 _aria2_proc = None
@@ -334,7 +591,7 @@ ALLOWED_METHODS = {
     "tellActive", "tellWaiting", "tellStopped", "tellStatus",
     "pause", "unpause", "pauseAll", "unpauseAll",
     "remove", "removeDownloadResult", "purgeDownloadResult",
-    "getGlobalStat", "getGlobalOption", "changeGlobalOption",
+    "getGlobalStat", "getGlobalOption", "changeGlobalOption", "changeOption",
     "getVersion", "getSessionInfo", "saveSession", "getFiles", "getUris",
 }
 
@@ -410,6 +667,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._need_auth()
             return self._json(200, load_settings())
+        if path == "/api/history":
+            if not self._authed():
+                return self._need_auth()
+            return self._json(200, {"entries": load_history()})
         if path == "/api/log":
             if not self._authed():
                 return self._need_auth()
@@ -490,9 +751,31 @@ class Handler(BaseHTTPRequestHandler):
                             settings[group][k] = v
                         else:
                             return self._json(HTTPStatus.BAD_REQUEST, {"error": f"bad value for {k}"})
+            sched = body.get("schedule")
+            if isinstance(sched, dict):
+                cleaned = _clean_schedule(sched)
+                if cleaned is None:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "bad schedule"})
+                settings["schedule"] = cleaned
+            prefs = body.get("prefs")
+            if isinstance(prefs, dict):
+                for k, v in prefs.items():
+                    if not isinstance(v, (str, bool, int, float)) or len(str(v)) > 500:
+                        return self._json(HTTPStatus.BAD_REQUEST, {"error": f"bad pref: {k}"})
+                    if v == "":
+                        settings["prefs"].pop(k, None)
+                    else:
+                        settings["prefs"][k] = v
             save_settings(settings)
             apply_global_settings()
             return self._json(200, {"ok": True, "settings": settings})
+        if path == "/api/history-clear":
+            with _history_lock:
+                try:
+                    HISTORY_PATH.unlink()
+                except OSError:
+                    pass
+            return self._json(200, {"ok": True})
         if path == "/api/remove-files":
             return self._remove_files()
         if path == "/api/rpc":
@@ -544,6 +827,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(HTTPStatus.BAD_GATEWAY, {"error": f"aria2: {e}"})
         paths = [f.get("path") for f in status.get("files") or [] if f.get("path")]
+        if status.get("status") in ("complete", "error", "removed"):
+            _record_history([status])  # keep a history trace before it goes
         try:
             if status.get("status") in ("complete", "error", "removed"):
                 rpc_call("aria2.removeDownloadResult", [gid])
@@ -588,7 +873,12 @@ class Handler(BaseHTTPRequestHandler):
                 req = urllib.request.Request(RPC_URL, data=json.dumps(payload).encode(),
                                              headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=20) as resp:
-                    return self._send(200, resp.read())
+                    data = resp.read()
+                try:
+                    _harvest_history(json.loads(data.decode()))
+                except Exception:
+                    pass
+                return self._send(200, data)
             except Exception as e:
                 return self._json(HTTPStatus.BAD_GATEWAY, {"error": f"aria2 unreachable: {e}"})
         short = method.split(".", 1)[-1]
@@ -611,6 +901,11 @@ class Handler(BaseHTTPRequestHandler):
                 # leaves a window where a hard kill loses the new task.
                 try:
                     rpc_call("aria2.saveSession", [], timeout=3)
+                except Exception:
+                    pass
+            if short == "tellStopped":
+                try:
+                    _harvest_history(result.get("result"))
                 except Exception:
                     pass
             return self._json(200, {"result": result.get("result")})
@@ -703,6 +998,7 @@ def main():
     if AUTOSTART:
         start_aria2()
     apply_global_settings()
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
     server_cls = DualStackServer if ":" in HOST else ThreadingHTTPServer
     try:
         server = server_cls((HOST, PORT), Handler)

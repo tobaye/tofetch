@@ -4,13 +4,16 @@ import android.app.Activity
 import android.app.DownloadManager
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.webkit.URLUtil
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
@@ -18,14 +21,23 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
     private lateinit var web: WebView
     private val handler = Handler(Looper.getMainLooper())
+    private var pageLoaded = false
+    private var pendingShare: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Diag.installCrashLogger(this)
         Diag.log(this, "=== activity onCreate; ${Diag.deviceInfo()} ===")
+        captureShare(intent)
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    pageLoaded = true
+                    deliverShare()
+                }
+            }
             // Downloads started from the page (retrieve a finished file,
             // export diagnostics) go through the system DownloadManager
             // into the public Downloads folder, like a normal app. Stopping
@@ -51,6 +63,12 @@ class MainActivity : Activity() {
         }
         setContentView(web)
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+            } catch (e: Exception) {
+            }
+        }
         try {
             startForegroundService(Intent(this, ToFetchService::class.java))
             Diag.log(this, "startForegroundService ok")
@@ -58,6 +76,39 @@ class MainActivity : Activity() {
             Diag.logError(this, "startForegroundService", t)
         }
         waitForServer(0)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureShare(intent)
+        deliverShare()
+    }
+
+    // System share (ACTION_SEND text) and magnet:/thunder: VIEW intents
+    // land here; the text goes to the page's __tofetchShare hook, which
+    // opens the add dialog and runs the usual link extraction.
+    private fun captureShare(intent: Intent?) {
+        val text = when (intent?.action) {
+            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
+            Intent.ACTION_VIEW -> intent.dataString
+            else -> null
+        }
+        if (!text.isNullOrBlank()) {
+            pendingShare = text
+            Diag.log(this, "share captured (${text.length} chars)")
+        }
+    }
+
+    private fun deliverShare() {
+        val text = pendingShare ?: return
+        if (!pageLoaded) return
+        pendingShare = null
+        web.evaluateJavascript(
+            "window.__tofetchShare && window.__tofetchShare(" + JSONObject.quote(text) + ")",
+            null
+        )
+        Toast.makeText(this, "已填入分享内容", Toast.LENGTH_SHORT).show()
     }
 
     private fun waitForServer(tries: Int) {

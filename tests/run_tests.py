@@ -353,6 +353,27 @@ def main() -> int:
         report("T10 remove-files deletes the downloaded file",
                existed and rm.get("deleted", 0) >= 1 and not f10.exists(),
                f"(deleted={rm.get('deleted')})")
+
+        # T11 history: finished tasks are harvested from tellStopped polls
+        td.rpc("tellStopped", [0, 100, ["gid", "status", "totalLength",
+                                        "completedLength", "files", "dir",
+                                        "errorMessage"]])
+        def history_call(path, body=None):
+            req = urllib.request.Request(
+                td.ui + path,
+                data=json.dumps(body or {}).encode() if body is not None else None,
+                headers={"Content-Type": "application/json"},
+                method="POST" if body is not None else "GET")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode())
+        entries = history_call("/api/history").get("entries", [])
+        hist_ok = any(e.get("name") == "t10.bin" and e.get("status") == "complete"
+                      for e in entries)
+        history_call("/api/history-clear", {})
+        entries2 = history_call("/api/history").get("entries", [])
+        report("T11 history records finished tasks and clears",
+               hist_ok and entries2 == [],
+               f"(entries={len(entries)})")
     finally:
         td.stop()
         httpd.shutdown()
@@ -428,6 +449,45 @@ def main() -> int:
     finally:
         td8.stop()
         shutil.rmtree(work8, ignore_errors=True)
+
+    # T12 scheduler: a speed window covering "now" applies its limit to
+    # the engine; clearing the schedule restores the default (0).
+    work12 = Path(tempfile.mkdtemp(prefix="tofetch-test12-"))
+    td12 = ToFetch(work12, aria2, free_port(), free_port(),
+                   extra_env={"TOFETCH_SCHED_TICK": "1"})
+    try:
+        td12.wait_engine()
+        now = time.localtime()
+        frm = time.strftime("%H:%M", time.localtime(time.time() - 3600))
+        to = time.strftime("%H:%M", time.localtime(time.time() + 3600))
+        td12.api("/api/settings", {"schedule": {
+            "speed_windows": [{"from": frm, "to": to, "down": 321, "up": 0}]}})
+        applied = False
+        for _ in range(30):
+            opt = td12.rpc("getGlobalOption", [])
+            if str(opt.get("max-overall-download-limit")) == str(321 * 1024):
+                applied = True
+                break
+            time.sleep(0.5)
+        td12.api("/api/settings", {"schedule": {}})
+        restored = False
+        for _ in range(30):
+            opt = td12.rpc("getGlobalOption", [])
+            if str(opt.get("max-overall-download-limit")) == "0":
+                restored = True
+                break
+            time.sleep(0.5)
+        try:
+            td12.api("/api/settings", {"schedule": {"pause_at": "99:99"}})
+            rejected = False
+        except Exception:
+            rejected = True
+        report("T12 speed window applies and restores; bad schedule rejected",
+               applied and restored and rejected,
+               f"(applied={applied}, restored={restored}, rejected={rejected})")
+    finally:
+        td12.stop()
+        shutil.rmtree(work12, ignore_errors=True)
 
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],
