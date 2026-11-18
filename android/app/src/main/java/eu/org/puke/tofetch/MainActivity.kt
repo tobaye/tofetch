@@ -9,14 +9,12 @@ import android.os.Looper
 import android.webkit.WebView
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.TextView
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
     private lateinit var web: WebView
-    private lateinit var status: TextView
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,30 +36,21 @@ class MainActivity : Activity() {
                 finish()
             }
         })
-        status = TextView(this).apply { textSize = 11f }
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
         }
         root.addView(bar)
-        root.addView(status)
         root.addView(web, LinearLayout.LayoutParams(-1, -1))
         setContentView(root)
-        showLog()
 
         try {
             startForegroundService(Intent(this, ToFetchService::class.java))
             Diag.log(this, "startForegroundService ok")
         } catch (t: Throwable) {
             Diag.logError(this, "startForegroundService", t)
-            showLog()
         }
         waitForServer(0)
-    }
-
-    private fun showLog() {
-        val tail = Diag.read(this).takeLast(3000)
-        status.text = if (tail.isBlank()) "ToFetch 启动中…" else tail
     }
 
     private fun waitForServer(tries: Int) {
@@ -81,13 +70,13 @@ class MainActivity : Activity() {
                         Diag.log(this, "server answered, loading UI")
                         web.loadUrl("http://127.0.0.1:8077/")
                     }
-                    tries < 60 -> {
-                        showLog()
-                        handler.postDelayed({ waitForServer(tries + 1) }, 500)
-                    }
+                    tries < 60 -> handler.postDelayed({ waitForServer(tries + 1) }, 500)
                     else -> {
                         Diag.log(this, "server never answered after 30s")
-                        showLog()
+                        web.loadData(
+                            "<h3>ToFetch 服务启动失败，请退出应用后重试</h3>",
+                            "text/html", "utf-8"
+                        )
                     }
                 }
             }
