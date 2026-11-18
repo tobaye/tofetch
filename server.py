@@ -327,6 +327,12 @@ class Handler(BaseHTTPRequestHandler):
                 if f.exists():
                     data = f.read_bytes()[-60000:].decode(errors="replace")
                     parts.append(f"===== {name} =====\n{data}")
+            # The Android shell passes its startup log path in; include it
+            # so this one export carries the full diagnostics picture.
+            startup_log = os.environ.get("TOFETCH_STARTUP_LOG")
+            if startup_log and Path(startup_log).exists():
+                data = Path(startup_log).read_bytes()[-60000:].decode(errors="replace")
+                parts.append(f"===== startup.log =====\n{data}")
             body = ("\n\n".join(parts) or "no logs yet").encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")

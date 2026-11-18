@@ -19,12 +19,15 @@ import sys
 from pathlib import Path
 
 
-def start(files_dir, data_dir, download_dir, aria2_bin):
+def start(files_dir, data_dir, download_dir, aria2_bin, startup_log=None):
     os.environ["TOFETCH_HOST"] = "127.0.0.1"
     os.environ["TOFETCH_PORT"] = "8077"
     os.environ["TOFETCH_DATA_DIR"] = data_dir
     os.environ["TOFETCH_DOWNLOAD_DIR"] = download_dir
     os.environ["ARIA2_BIN"] = aria2_bin
+    if startup_log:
+        # Lets /api/log include the shell's startup log in its export.
+        os.environ["TOFETCH_STARTUP_LOG"] = startup_log
     sys.argv = ["server"]
     signal.signal = lambda *a, **k: None  # noqa: E731 - see module docstring
 

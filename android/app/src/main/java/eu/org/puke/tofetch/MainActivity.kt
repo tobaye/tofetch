@@ -1,16 +1,16 @@
 package eu.org.puke.tofetch
 
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.webkit.URLUtil
 import android.webkit.WebView
-import android.widget.Button
-import android.widget.LinearLayout
 import android.widget.Toast
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
@@ -23,32 +23,33 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         Diag.installCrashLogger(this)
         Diag.log(this, "=== activity onCreate; ${Diag.deviceInfo()} ===")
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val bar = LinearLayout(this)
-        bar.addView(Button(this).apply {
-            text = "在浏览器打开"
-            setOnClickListener {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:8077/")))
-            }
-        })
-        bar.addView(Button(this).apply {
-            text = "停止服务"
-            setOnClickListener {
-                stopService(Intent(this@MainActivity, ToFetchService::class.java))
-                finish()
-            }
-        })
-        bar.addView(Button(this).apply {
-            text = "导出日志"
-            setOnClickListener { exportLogs() }
-        })
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            // Downloads started from the page (retrieve a finished file,
+            // export diagnostics) go through the system DownloadManager
+            // into the public Downloads folder, like a normal app. Stopping
+            // the service lives on the foreground-service notification.
+            setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+                val name = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                try {
+                    val req = DownloadManager.Request(Uri.parse(url))
+                        .setTitle(name)
+                        .setMimeType(mimeType)
+                        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+                    getSystemService(DownloadManager::class.java).enqueue(req)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "已开始下载：$name（系统下载目录）",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "下载失败：${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
-        root.addView(bar)
-        root.addView(web, LinearLayout.LayoutParams(-1, -1))
-        setContentView(root)
+        setContentView(web)
 
         try {
             startForegroundService(Intent(this, ToFetchService::class.java))
@@ -57,36 +58,6 @@ class MainActivity : Activity() {
             Diag.logError(this, "startForegroundService", t)
         }
         waitForServer(0)
-    }
-
-    /** Merge the shell startup log and the server's own diagnostics into one
-     * file in the download dir (fixed name, overwritten each time so exports
-     * never pile up), ready to be picked up with any file manager. */
-    private fun exportLogs() {
-        Toast.makeText(this, "正在导出日志…", Toast.LENGTH_SHORT).show()
-        thread {
-            val sb = StringBuilder()
-            sb.append("===== startup.log =====\n").append(Diag.read(this))
-            sb.append("\n===== server diagnostics =====\n")
-            try {
-                val c = URL("http://127.0.0.1:8077/api/log").openConnection() as HttpURLConnection
-                c.connectTimeout = 3000
-                c.readTimeout = 3000
-                sb.append(c.inputStream.bufferedReader().readText())
-                c.disconnect()
-            } catch (e: Exception) {
-                sb.append("(服务未运行，未能读取服务日志：${e.message})")
-            }
-            val extBase = getExternalFilesDir(null) ?: filesDir
-            val out = File(File(extBase, "ToFetch").apply { mkdirs() }, "tofetch-diagnostics.txt")
-            val msg = try {
-                out.writeText(sb.toString())
-                "日志已导出到下载目录：tofetch-diagnostics.txt"
-            } catch (e: Exception) {
-                "导出失败：${e.message}"
-            }
-            handler.post { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
-        }
     }
 
     private fun waitForServer(tries: Int) {

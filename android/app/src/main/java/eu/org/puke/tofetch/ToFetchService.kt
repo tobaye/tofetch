@@ -3,6 +3,7 @@ package eu.org.puke.tofetch
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -28,10 +29,20 @@ class ToFetchService : Service() {
             nm.createNotificationChannel(
                 NotificationChannel("tofetch", "ToFetch", NotificationManager.IMPORTANCE_LOW)
             )
+            val openIntent = PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val stopIntent = PendingIntent.getService(
+                this, 1, Intent(this, ToFetchService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             val notif = Notification.Builder(this, "tofetch")
                 .setContentTitle("ToFetch 正在运行")
-                .setContentText("http://127.0.0.1:8077")
+                .setContentText("点按打开应用；停止请按右侧按钮")
                 .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentIntent(openIntent)
+                .addAction(0, "停止服务", stopIntent)
                 .build()
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -63,7 +74,8 @@ class ToFetchService : Service() {
                     filesDir.absolutePath,
                     dataDir.absolutePath,
                     downloadDir.absolutePath,
-                    aria2
+                    aria2,
+                    File(extBase, "startup.log").absolutePath
                 )
                 Diag.log(this, "server thread: launcher returned (server exited)")
             } catch (t: Throwable) {
@@ -72,9 +84,22 @@ class ToFetchService : Service() {
         }
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            Diag.log(this, "stop requested from notification")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+        return START_NOT_STICKY
+    }
+
     override fun onDestroy() {
         wakeLock?.run { if (isHeld) release() }
         android.os.Process.killProcess(android.os.Process.myPid())
         super.onDestroy()
+    }
+
+    companion object {
+        const val ACTION_STOP = "eu.org.puke.tofetch.STOP"
     }
 }
