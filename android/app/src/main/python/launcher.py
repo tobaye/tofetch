@@ -48,6 +48,11 @@ def start(files_dir, data_dir, download_dir, aria2_bin):
         ca_path.write_bytes(ca_data)
         os.environ["ARIA2_CA_CERTIFICATE"] = str(ca_path)
 
+    # aria2's built-in async DNS resolver finds no nameserver config on
+    # Android and fails lookups with "Could not resolve host"; switch the
+    # engine to the system resolver (same env-gated pattern as the CA fix).
+    os.environ.setdefault("ARIA2_ASYNC_DNS", "false")
+
     notes = []
     try:
         import server

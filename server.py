@@ -186,6 +186,12 @@ def start_aria2() -> None:
     ca_bundle = os.environ.get("ARIA2_CA_CERTIFICATE")
     if ca_bundle and Path(ca_bundle).exists():
         args.append(f"--ca-certificate={ca_bundle}")
+    # Optional: use the OS resolver instead of aria2's built-in async one.
+    # On Android the async resolver (c-ares) finds no usable nameserver
+    # config and lookups fail with "Could not resolve host", while the
+    # system resolver (getaddrinfo) goes through Android's resolver.
+    if os.environ.get("ARIA2_ASYNC_DNS", "").strip().lower() in ("false", "0", "no", "off"):
+        args.append("--async-dns=false")
     aria2_log = DATA_DIR / "aria2.log"
     try:
         if aria2_log.exists() and aria2_log.stat().st_size > 1024 * 1024:
