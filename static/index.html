@@ -281,14 +281,16 @@ function normalizeUrl(u){
 }
 // 从任意一段文本里提取下载链接：http/https/ftp 直链、磁力、ed2k、迅雷。
 // 按出现顺序返回，顺手去掉链接尾部粘连的标点（如中文句号、括号）。
-// 直链/磁力只认 ASCII：链接后面紧贴的中文一定是正文，不切就会把
-// 「…apk所有信息」整段吞进去（2026-11-18 真机实测）；ed2k 的文件名可以是
-// 中文，它有明确的 |/ 结尾，按结尾切。
+// 按出现顺序返回。直链先「宽抓」再由 refineHttp「定尾」：链接本体里的
+// 中文要保留（如 /报告2026.pdf），粘在链接尾巴上的正文中文要切掉
+// （如 …apk所有信息）——按字符集一刀切必误伤一边。
 function extractLinks(text){
-  const re = /(ed2k:\/\/\|file\|[^\s<>"']+?\|\/|magnet:\?[^\s<>"'\u0080-\uffff]+|ed2k:\/\/[^\s<>"'\u0080-\uffff]+|thunder:\/\/[A-Za-z0-9+/=]+|(?:https?|ftp):\/\/[^\s<>"'\u0080-\uffff]+)/gi;
+  const re = /(ed2k:\/\/\|file\|[^\s<>"']+?\|\/|magnet:\?[^\s<>"'\u0080-\uffff]+|ed2k:\/\/[^\s<>"'\u0080-\uffff]+|thunder:\/\/[A-Za-z0-9+/=]+|(?:https?|ftp):\/\/[^\s<>"'，。；、【】「」『』（）《》]+)/gi;
   const out = [], seen = new Set();
   for (const m of String(text||"").matchAll(re)){
-    let u = m[0].replace(/[.,;:!?，。；：、）)】\]>"']+$/, "");
+    let u = m[0];
+    if (/^(?:https?|ftp):\/\//i.test(u)) u = refineHttp(u);
+    else u = u.replace(/[.,;:!?，。；：、）)】\]>"']+$/, "");
     if (!u) continue;
     const key = normalizeUrl(u);
     if (seen.has(key)) continue;
@@ -296,6 +298,59 @@ function extractLinks(text){
   }
   return out;
 }
+const DL_EXTS = "apk|zip|7z|rar|tar|gz|bz2|xz|pdf|mp4|mkv|avi|mov|wmv|mp3|flac|wav|iso|img|dmg|exe|msi|deb|rpm|torrent|epub|mobi|doc|docx|xls|xlsx|ppt|pptx|txt|csv|png|jpg|jpeg|gif|webp|svg|bin";
+// 尾巴收拾：剥掉粘连的 ASCII 标点；右括号只剥落单的，成对的保留
+// （如 Wikipedia 的 PC_(computers)）。
+function trimUrlTail(u){
+  let prev;
+  do {
+    prev = u;
+    u = u.replace(/[.,;:!?\]>"']+$/, "");
+    if (u.endsWith(")")){
+      const open = (u.match(/\(/g) || []).length;
+      const close = (u.match(/\)/g) || []).length;
+      if (close > open) u = u.slice(0, -1);
+    }
+  } while (u !== prev);
+  return u;
+}
+// 给宽抓到的直链定尾：
+// 1) 有已知下载扩展名就锚在扩展名处（其后的 ASCII 查询串/锚点保留），
+//    扩展名前的中文保留、后的中文切掉；
+// 2) 没有扩展名时，中文段后面还能接 / 或 .扩展名 就算路径保留，
+//    否则视为粘连正文，从该中文段起切掉。
+function refineHttp(u){
+  const m = u.match(/^((?:https?|ftp):\/\/[^\/?#]+)([\s\S]*)$/i);
+  if (!m) return trimUrlTail(u);
+  const head = m[1];
+  const rest = m[2] || "";
+  const extRe = new RegExp("\.(?:" + DL_EXTS + ")(?=$|[^A-Za-z0-9])", "gi");
+  let last = null, mm;
+  while ((mm = extRe.exec(rest)) !== null) last = mm;
+  if (last){
+    const end = last.index + last[0].length;
+    const tail = (rest.slice(end).match(/^[\x21-\x7E]*/) || [""])[0];
+    return trimUrlTail(head + rest.slice(0, end) + tail);
+  }
+  const cjk = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+  let i = 0;
+  while (i < rest.length){
+    if (cjk.test(rest[i])){
+      let j = i;
+      while (j < rest.length && cjk.test(rest[j])) j++;
+      const after = rest[j] || "";
+      if (after === "/"){ i = j; continue; }
+      if (after === "."){
+        const ext2 = rest.slice(j).match(/\.[A-Za-z0-9]+[\x21-\x7E]*/);
+        if (ext2) return trimUrlTail(head + rest.slice(0, j) + ext2[0]);
+      }
+      return trimUrlTail(head + rest.slice(0, i));
+    }
+    i++;
+  }
+  return trimUrlTail(head + rest);
+}
+
 function knownUris(){
   const s = new Set();
   for (const t of (window.__tasks || []))
