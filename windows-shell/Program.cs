@@ -252,14 +252,14 @@ namespace ToFetchPanel
             _btnOpen.Text = "打开下载界面";
             _btnOpen.Location = new Point(12, 164);
             _btnOpen.Size = new Size(150, 30);
-            _btnOpen.Click += (s, e) => { if (Backend.EnsureStarted()) { _userStopped = false; Backend.OpenUi(); } };
+            _btnOpen.Click += async (s, e) => { if (await Task.Run(() => Backend.EnsureStarted())) { _userStopped = false; Backend.OpenUi(); } };
             _btnStart.Text = "启动服务";
             _btnStart.Location = new Point(172, 164);
             _btnStart.Size = new Size(110, 30);
-            _btnStart.Click += (s, e) =>
+            _btnStart.Click += async (s, e) =>
             {
                 _userStopped = false;
-                Log(Backend.EnsureStarted() ? "✓ 服务已启动" : "✗ 服务启动失败，看诊断日志排查");
+                Log(await Task.Run(() => Backend.EnsureStarted()) ? "✓ 服务已启动" : "✗ 服务启动失败，看诊断日志排查");
                 RefreshState();
             };
             _btnStop.Text = "停止服务";
@@ -315,7 +315,7 @@ namespace ToFetchPanel
             _tray.DoubleClick += (s, e) => ShowPanel();
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开面板", null, (s, e) => ShowPanel());
-            menu.Items.Add("打开下载界面", null, (s, e) => { if (Backend.EnsureStarted()) Backend.OpenUi(); });
+            menu.Items.Add("打开下载界面", null, async (s, e) => { if (await Task.Run(() => Backend.EnsureStarted())) Backend.OpenUi(); });
             menu.Items.Add("暂停全部", null, (s, e) =>
             {
                 var r = Api.Post("/api/rpc", new Dictionary<string, object>
@@ -330,11 +330,13 @@ namespace ToFetchPanel
             _timer.Tick += (s, e) => RefreshState();
             _timer.Start();
 
-            Shown += (s, e) =>
+            Shown += async (s, e) =>
             {
                 if (_startHidden) Hide();
                 Log("面板已打开，服务在后台运行");
-                if (!_userStopped) Backend.EnsureStarted();
+                // Never block the UI thread on service startup: while the
+                // backend is still coming up the panel must stay clickable.
+                if (!_userStopped) await Task.Run(() => Backend.EnsureStarted());
                 RefreshState();
             };
             FormClosing += OnClosing;
@@ -444,13 +446,13 @@ namespace ToFetchPanel
             RefreshState();
         }
 
-        private void FullExit()
+        private async void FullExit()
         {
             if (MessageBox.Show(this,
                     "退出 ToFetch 将：停止服务、注销磁力与 .torrent 关联、取消开机自启。\n\n退出后无法用 ToFetch 下载，点磁力也不会再唤起 ToFetch；要再用，重新打开 ToFetch、并在面板里重新打开关联即可。\n\n确定退出？",
                     "退出 ToFetch", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
                 return;
-            if (!Backend.IsUp()) Backend.EnsureStarted();
+            if (!Backend.IsUp()) await Task.Run(() => Backend.EnsureStarted());
             Api.Post("/api/exit", new Dictionary<string, object> { { "mode", "full" } }, 8000);
             Log("✓ 已退出，关联与自启已还给系统");
             _reallyExit = true;
