@@ -48,7 +48,11 @@ namespace ToFetchPanel
 
     internal static class Api
     {
-        private static readonly HttpClient Http = new HttpClient();
+        // The backend is always on this machine: never route through the
+        // system proxy (a leftover proxy setting makes 127.0.0.1 requests
+        // fail, and the panel then reports a running backend as stopped).
+        private static readonly HttpClient Http =
+            new HttpClient(new HttpClientHandler { UseProxy = false });
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
         public static Dictionary<string, object> Get(string path, int timeoutMs)
