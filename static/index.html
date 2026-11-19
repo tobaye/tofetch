@@ -257,7 +257,10 @@
     </div>
     <div class="set-group" data-group="task">
       <label>下载目录（绝对路径，留空 = 默认；只影响之后新建的任务）</label>
-      <input type="text" id="setDir">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="setDir" style="flex:1">
+        <button type="button" id="dirPickBtn" style="display:none" onclick="openDirPicker()">浏览...</button>
+      </div>
       <label>失败自动重试次数（0 = 不重试）</label>
       <input type="number" id="setTries" min="0" max="100">
       <label>重试间隔（秒）</label>
@@ -353,6 +356,18 @@
   </div>
 </dialog>
 
+<dialog id="dirDlg">
+  <h3>选择下载目录</h3>
+  <p class="hint" id="dirCur"></p>
+  <div id="dirDrives" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+  <div style="margin-bottom:8px"><button type="button" onclick="newDir()">＋ 新建文件夹</button></div>
+  <div id="dirList" style="max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px"></div>
+  <div class="dlg-btns">
+    <button onclick="dirDlg.close()">取消</button>
+    <button class="primary" onclick="pickDir()">选这个目录</button>
+  </div>
+</dialog>
+
 <dialog id="delDlg">
   <h3>删除任务</h3>
   <p id="delName" style="word-break:break-all"></p>
@@ -397,7 +412,7 @@
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const addDlg = $("#addDlg"), setDlg = $("#setDlg"), delDlg = $("#delDlg");
+const addDlg = $("#addDlg"), setDlg = $("#setDlg"), delDlg = $("#delDlg"), dirDlg = $("#dirDlg");
 const histDlg = $("#histDlg"), detailDlg = $("#detailDlg"), filesDlg = $("#filesDlg");
 let needLogin = false;
 let viewFilter = "all", viewQuery = "", viewSort = "def";
@@ -590,6 +605,7 @@ async function refresh(){
     if (st.platform === "windows" && !window.__winLocal){
       window.__winLocal = true;
       const nb = $("#setNavLocal"); if (nb) nb.style.display = "";
+      const db = $("#dirPickBtn"); if (db) db.style.display = "";
     }
     $("#dirHint").textContent = st.download_dir ? "下载目录：" + st.download_dir : "";
     const ew = $("#engineWarn");
@@ -1216,6 +1232,70 @@ async function exitFull(){
   if (!confirm("退出 ToFetch 将：停止服务、注销磁力与 .torrent 关联、取消开机自启。\n\n退出后无法用 ToFetch 下载，点磁力也不会再唤起 ToFetch；要再用，重新打开 ToFetch、并在设置里重新打开关联即可。\n\n确定退出？")) return;
   try{ await api("/api/exit", {mode: "full"}); }catch(e){}
   document.body.innerHTML = "<div style='padding:48px;text-align:center'>ToFetch 已退出，关联与自启已还给系统。</div>";
+}
+
+let dirPath = "";
+async function fsList(p){
+  const r = await fetch("/api/fs?path=" + encodeURIComponent(p || ""));
+  if (!r.ok) throw new Error("open failed");
+  return r.json();
+}
+function renderDir(d){
+  dirPath = d.path || "";
+  $("#dirCur").textContent = "当前：" + (dirPath || "（先选一个磁盘）");
+  const dv = $("#dirDrives"); dv.innerHTML = "";
+  (d.drives || []).forEach(dr => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = dr;
+    b.onclick = () => fsList(dr).then(renderDir).catch(() => {});
+    dv.appendChild(b);
+  });
+  const box = $("#dirList"); box.innerHTML = "";
+  if (d.parent !== null && d.parent !== undefined){
+    const up = document.createElement("div");
+    up.textContent = "← 上一级";
+    up.style.cssText = "padding:7px 8px;cursor:pointer;color:var(--accent2)";
+    up.onclick = () => fsList(d.parent).then(renderDir).catch(() => {});
+    box.appendChild(up);
+  }
+  (d.dirs || []).forEach(name => {
+    const row = document.createElement("div");
+    row.textContent = name;
+    row.style.cssText = "padding:7px 8px;cursor:pointer";
+    const child = dirPath
+      ? (dirPath.endsWith("\\") || dirPath.endsWith("/") ? dirPath + name : dirPath + "\\" + name)
+      : name;
+    row.onclick = () => fsList(child).then(renderDir).catch(() => {});
+    box.appendChild(row);
+  });
+  if (!(d.dirs || []).length && dirPath)
+    box.innerHTML += '<div class="hint" style="padding:7px 8px">（没有子文件夹）</div>';
+}
+async function openDirPicker(){
+  dirDlg.showModal();
+  const start = $("#setDir").value.trim() || window.__dlDir || "";
+  try { renderDir(await fsList(start)); }
+  catch(e){
+    try { renderDir(await fsList("")); }
+    catch(e2){ $("#dirList").textContent = "打不开目录列表"; }
+  }
+}
+function pickDir(){
+  if (dirPath) $("#setDir").value = dirPath;
+  dirDlg.close();
+}
+async function newDir(){
+  if (!dirPath){ $("#dirCur").textContent = "先选一个磁盘或目录，再在里面新建"; return; }
+  const name = prompt("新文件夹名：");
+  if (!name) return;
+  try{
+    const r = await fetch("/api/fs/mkdir", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: dirPath, name }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "建不了");
+    renderDir(d);
+  }catch(e){ $("#dirCur").textContent = "✗ " + (e.message || "新建失败"); }
 }
 
 function showSetGroup(name){
