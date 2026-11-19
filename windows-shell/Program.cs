@@ -299,6 +299,7 @@ namespace ToFetchPanel
         private readonly CheckBox _chkAuto = new CheckBox();
         private readonly ComboBox _cmbBrowser = new ComboBox();
         private bool _syncingBrowser;
+        private readonly Button _btnDir = new Button();
         private readonly Label _ucHint = new Label();
         private readonly TextBox _log = new TextBox();
         private readonly NotifyIcon _tray = new NotifyIcon();
@@ -320,7 +321,7 @@ namespace ToFetchPanel
             _startHidden = startHidden;
             Text = "ToFetch 控制面板";
             Font = new Font("Microsoft YaHei UI", 9f);
-            ClientSize = new Size(520, 575);
+            ClientSize = new Size(520, 605);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -384,7 +385,7 @@ namespace ToFetchPanel
             _btnStop.Click += (s, e) => StopService();
             Controls.AddRange(new Control[] { _btnOpen, _btnStart, _btnStop });
 
-            var gLocal = new GroupBox { Text = "本机集成（状态实时回读，改动立即生效）", Location = new Point(12, 206), Size = new Size(496, 136) };
+            var gLocal = new GroupBox { Text = "本机集成（状态实时回读，改动立即生效）", Location = new Point(12, 206), Size = new Size(496, 166) };
             _chkAssoc.Text = "磁力链接与 .torrent 文件关联到 ToFetch";
             _chkAssoc.AutoSize = true;
             _chkAssoc.Location = new Point(14, 24);
@@ -405,16 +406,21 @@ namespace ToFetchPanel
                 Browsers.Save(bc.Exe);
                 Log("打开界面浏览器：" + bc.Name);
             };
+            var dirLabel = new Label { Text = "下载目录（改后只影响新任务）：", AutoSize = true, Location = new Point(14, 106) };
+            _btnDir.Text = "选择…";
+            _btnDir.Location = new Point(190, 101);
+            _btnDir.Size = new Size(80, 26);
+            _btnDir.Click += async (s, e) => await PickDownloadDir();
             _ucHint.ForeColor = Color.DarkGoldenrod;
             _ucHint.AutoSize = false;
-            _ucHint.Location = new Point(14, 102);
+            _ucHint.Location = new Point(14, 134);
             _ucHint.Size = new Size(468, 28);
-            gLocal.Controls.AddRange(new Control[] { _chkAssoc, _chkAuto, browserLabel, _cmbBrowser, _ucHint });
+            gLocal.Controls.AddRange(new Control[] { _chkAssoc, _chkAuto, browserLabel, _cmbBrowser, dirLabel, _btnDir, _ucHint });
             Controls.Add(gLocal);
             InitBrowserCombo();
 
             _btnExit.Text = "退出 ToFetch";
-            _btnExit.Location = new Point(378, 352);
+            _btnExit.Location = new Point(378, 382);
             _btnExit.Size = new Size(130, 30);
             _btnExit.Click += (s, e) => FullExit();
             Controls.Add(_btnExit);
@@ -423,11 +429,11 @@ namespace ToFetchPanel
                 Text = "退出 = 停服务＋注销关联＋取消自启，全部还给系统。",
                 ForeColor = Color.Gray,
                 AutoSize = true,
-                Location = new Point(12, 360),
+                Location = new Point(12, 390),
             };
             Controls.Add(exitHint);
 
-            var gLog = new GroupBox { Text = "记录", Location = new Point(12, 392), Size = new Size(496, 170) };
+            var gLog = new GroupBox { Text = "记录", Location = new Point(12, 422), Size = new Size(496, 170) };
             _log.Multiline = true;
             _log.ReadOnly = true;
             _log.ScrollBars = ScrollBars.Vertical;
@@ -520,6 +526,42 @@ namespace ToFetchPanel
                 var ws = Api.Get("/api/win/state", 2000);
                 if (ws != null) ApplyWinState(ws);
             }
+        }
+
+        private async Task PickDownloadDir()
+        {
+            if (!await Task.Run(() => Backend.EnsureStarted()))
+            {
+                Log("✗ 服务没在运行，改不了下载目录");
+                return;
+            }
+            var st = await Task.Run(() => Api.Get("/api/state", 3000));
+            var cur = st == null ? "" : Api.Str(st, "download_dir");
+            string chosen;
+            using (var dlg = new FolderBrowserDialog())
+            {
+                dlg.Description = "选择下载目录（只影响之后新建的任务）";
+                if (cur.Length > 0 && Directory.Exists(cur)) dlg.SelectedPath = cur;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                chosen = dlg.SelectedPath;
+            }
+            var body = new Dictionary<string, object>
+            {
+                { "global", new Dictionary<string, object> { { "dir", chosen } } },
+            };
+            var r = await Task.Run(() => Api.Post("/api/settings", body, 10000));
+            if (r == null)
+            {
+                Log("✗ 下载目录没改成：连不上服务");
+                return;
+            }
+            var st2 = await Task.Run(() => Api.Get("/api/state", 3000));
+            var now = st2 == null ? "" : Api.Str(st2, "download_dir");
+            if (now.Length > 0 && string.Equals(now.TrimEnd('\\'), chosen.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                Log("✓ 下载目录已改为 " + now + "（已回读确认）");
+            else
+                Log("✗ 下载目录没有生效，现在仍是 " + (now.Length > 0 ? now : "未知"));
+            RefreshState();
         }
 
         private void InitBrowserCombo()
