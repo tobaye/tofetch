@@ -814,8 +814,277 @@ ALLOWED_METHODS = {
 }
 
 
+# ------------------------------------------------- windows integration
+# Windows local package only: per-user (HKCU) magnet / .torrent
+# association and autostart, driven by verified toggles in the settings
+# UI and by the ToFetch.exe control panel. Every write is read back
+# before it is reported - the state shown is the state the registry is
+# actually in, never an optimistic guess (a toggle that lies is worse
+# than the old .bat that printed "Done"; that is how this started).
+#
+# The registry is reached through four tiny primitives with two
+# backends: real winreg on Windows, and a JSON-file fake selected by
+# TOFETCH_FAKE_REGISTRY (tests only) so the logic is exercised
+# end-to-end on any platform.
+
+PLATFORM = _env("PLATFORM", "") or ("windows" if os.name == "nt" else "other")
+FAKE_REGISTRY = _env("FAKE_REGISTRY", "")
+WIN_AVAILABLE = PLATFORM == "windows" or bool(FAKE_REGISTRY)
+LOCAL_BIND = HOST in ("127.0.0.1", "::1", "localhost")
+
+_PROGID_MAGNET = "ToFetch.magnet"
+_PROGID_TORRENT = "ToFetch.torrent"
+_CLASSES = r"Software\Classes"
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_UC_MAGNET = (r"Software\Microsoft\Windows\Shell\Associations"
+              r"\UrlAssociations\magnet\UserChoice")
+_UC_TORRENT = (r"Software\Microsoft\Windows\CurrentVersion\Explorer"
+               r"\FileExts\.torrent\UserChoice")
+
+
+def _shell_exe() -> Path:
+    return ROOT / "ToFetch.exe"
+
+
+def _opener_exists() -> bool:
+    return (_shell_exe().exists()
+            or ((ROOT / "python" / "pythonw.exe").exists()
+                and (ROOT / "tofetch-open.py").exists()))
+
+
+def _open_command() -> str:
+    """The command Windows runs for a magnet click / .torrent open."""
+    if _shell_exe().exists():
+        return f'"{_shell_exe()}" "%1"'
+    return (f'"{ROOT / "python" / "pythonw.exe"}" '
+            f'"{ROOT / "tofetch-open.py"}" "%1"')
+
+
+# -- registry primitives (HKCU only) --------------------------------------
+def _fake_reg_load() -> dict:
+    try:
+        return json.loads(Path(FAKE_REGISTRY).read_text())
+    except Exception:
+        return {}
+
+
+def _fake_reg_save(store: dict) -> None:
+    p = Path(FAKE_REGISTRY)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(store))
+
+
+def _reg_get(path: str, name: str):
+    """One HKCU value (name "" = the key's default). None when absent."""
+    if FAKE_REGISTRY:
+        return _fake_reg_load().get(path, {}).get(name)
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+            if name == "":
+                return winreg.QueryValue(k, "")
+            return winreg.QueryValueEx(k, name)[0]
+    except Exception:
+        return None
+
+
+def _reg_set(path: str, name: str, value: str) -> bool:
+    if FAKE_REGISTRY:
+        store = _fake_reg_load()
+        store.setdefault(path, {})[name] = value
+        _fake_reg_save(store)
+        return True
+    try:
+        import winreg
+        if name == "":
+            # SetValue on the parent handle sets the subkey's default
+            # value (and creates it) - the reliable route for the
+            # unnamed value, dodging SetValueEx's None-name quirks.
+            parent, _, leaf = path.rpartition("\\")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, parent, 0,
+                                winreg.KEY_SET_VALUE) as pk:
+                winreg.SetValue(pk, leaf, winreg.REG_SZ, value)
+        else:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+        return True
+    except Exception:
+        return False
+
+
+def _reg_delete_value(path: str, name: str) -> bool:
+    if FAKE_REGISTRY:
+        store = _fake_reg_load()
+        if path in store:
+            store[path].pop(name, None)
+            _fake_reg_save(store)
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, name)
+        return True
+    except Exception:
+        return False
+
+
+def _reg_delete_tree(path: str) -> bool:
+    if FAKE_REGISTRY:
+        store = _fake_reg_load()
+        for k in [k for k in store if k == path or k.startswith(path + "\\")]:
+            del store[k]
+        _fake_reg_save(store)
+        return True
+    try:
+        import winreg
+
+        def _wipe(p: str) -> None:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, p, 0,
+                                winreg.KEY_ALL_ACCESS) as k:
+                while True:
+                    try:
+                        sub = winreg.EnumKey(k, 0)
+                    except OSError:
+                        break
+                    _wipe(p + "\\" + sub)
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, p)
+
+        _wipe(path)
+        return True
+    except Exception:
+        return False
+
+
+# -- association / autostart state and actions ----------------------------
+def win_state() -> dict:
+    """Verified registry state, read fresh on every call."""
+    progid_cmd = _reg_get(_CLASSES + "\\" + _PROGID_MAGNET
+                          + r"\shell\open\command", "") or ""
+    direct_cmd = _reg_get(_CLASSES + r"\magnet\shell\open\command", "") or ""
+    tor_target = _reg_get(_CLASSES + r"\.torrent", "") or ""
+    tor_cmd = _reg_get(_CLASSES + "\\" + _PROGID_TORRENT
+                       + r"\shell\open\command", "") or ""
+    run = _reg_get(_RUN_KEY, "ToFetch") or ""
+    ours = lambda c: "tofetch" in str(c).lower()
+    low = progid_cmd.lower()
+    opener = ("exe" if "tofetch.exe" in low
+              else "py" if "tofetch-open.py" in low else "")
+    return {
+        "available": WIN_AVAILABLE,
+        "exe": _shell_exe().exists(),
+        "opener": opener,
+        "magnet": bool(ours(progid_cmd) and ours(direct_cmd)),
+        "torrent": bool(tor_target == _PROGID_TORRENT and ours(tor_cmd)),
+        "autostart": bool(ours(run)),
+        # A UserChoice naming another app outranks everything above;
+        # Windows protects its hash, so we can only report it and let
+        # the user pick ToFetch in Settings > Default apps.
+        "userchoice_magnet": _reg_get(_UC_MAGNET, "ProgId"),
+        "userchoice_torrent": _reg_get(_UC_TORRENT, "ProgId"),
+    }
+
+
+def win_set_assoc(on: bool) -> dict:
+    steps = {}
+    if on:
+        if not _opener_exists():
+            st = win_state()
+            st.update({"ok": False,
+                       "error": "包内缺少 ToFetch.exe，无法注册关联"})
+            return st
+        cmd = _open_command()
+        exe = _shell_exe()
+        pm = _CLASSES + "\\" + _PROGID_MAGNET
+        steps["magnet"] = bool(
+            _reg_set(pm, "", "URL:Magnet Link")
+            and _reg_set(pm, "URL Protocol", "")
+            and _reg_set(pm + r"\shell\open\command", "", cmd))
+        dm = _CLASSES + r"\magnet"
+        steps["magnet_direct"] = bool(
+            _reg_set(dm, "", "URL:Magnet Link")
+            and _reg_set(dm, "URL Protocol", "")
+            and _reg_set(dm + r"\shell\open\command", "", cmd))
+        pt = _CLASSES + "\\" + _PROGID_TORRENT
+        steps["torrent"] = bool(
+            _reg_set(_CLASSES + r"\.torrent", "", _PROGID_TORRENT)
+            and _reg_set(pt, "", "ToFetch torrent file")
+            and _reg_set(pt + r"\shell\open\command", "", cmd))
+        if exe.exists():
+            _reg_set(pm + r"\DefaultIcon", "", f'"{exe}",0')
+            _reg_set(pt + r"\DefaultIcon", "", f'"{exe}",0')
+        cap = r"Software\ToFetch\Capabilities"
+        steps["capabilities"] = bool(
+            _reg_set(cap, "ApplicationName", "ToFetch")
+            and _reg_set(cap, "ApplicationDescription",
+                         "ToFetch download manager")
+            and _reg_set(cap + r"\UrlAssociations", "magnet", _PROGID_MAGNET)
+            and _reg_set(cap + r"\FileAssociations", ".torrent",
+                         _PROGID_TORRENT)
+            and _reg_set(r"Software\RegisteredApplications", "ToFetch",
+                         r"Software\ToFetch\Capabilities"))
+    else:
+        # Hand everything back: remove only what is ours.
+        direct_cmd = _reg_get(_CLASSES + r"\magnet\shell\open\command",
+                              "") or ""
+        if "tofetch" in direct_cmd.lower():
+            steps["magnet_direct"] = _reg_delete_tree(_CLASSES + r"\magnet")
+        steps["magnet"] = _reg_delete_tree(_CLASSES + "\\" + _PROGID_MAGNET)
+        if (_reg_get(_CLASSES + r"\.torrent", "") or "") == _PROGID_TORRENT:
+            steps["torrent"] = _reg_delete_tree(_CLASSES + r"\.torrent")
+        steps["torrent_progid"] = _reg_delete_tree(
+            _CLASSES + "\\" + _PROGID_TORRENT)
+        steps["capabilities"] = bool(
+            _reg_delete_tree(r"Software\ToFetch")
+            and _reg_delete_value(r"Software\RegisteredApplications",
+                                  "ToFetch"))
+    st = win_state()
+    st["steps"] = steps
+    st["ok"] = ((st["magnet"] and st["torrent"]) if on
+                else (not st["magnet"] and not st["torrent"]))
+    return st
+
+
+def win_set_autostart(on: bool) -> dict:
+    if on:
+        if not _shell_exe().exists():
+            st = win_state()
+            st.update({"ok": False,
+                       "error": "包内缺少 ToFetch.exe，无法设置自启"})
+            return st
+        ok = _reg_set(_RUN_KEY, "ToFetch",
+                      f'"{_shell_exe()}" --background')
+    else:
+        ok = _reg_delete_value(_RUN_KEY, "ToFetch")
+    st = win_state()
+    st["ok"] = bool(ok and st["autostart"] == on)
+    return st
+
+
+# -- graceful self-shutdown (local packages only) --------------------------
+HTTPD = None  # set by main()
+
+
+def request_shutdown(delay: float = 0.4) -> None:
+    def _run():
+        time.sleep(delay)
+        try:
+            stop_aria2()
+        except Exception:
+            pass
+        try:
+            if HTTPD is not None:
+                HTTPD.shutdown()
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.3.0"
+    server_version = "ToFetch/1.4.0"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
@@ -836,11 +1105,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj).encode(), extra=extra)
 
     def _read_json(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n == 0:
+        raw = getattr(self, "_raw", None)
+        if raw is None:  # not buffered by do_POST (should not happen)
+            n = int(self.headers.get("Content-Length") or 0)
+            if n == 0:
+                return {}
+            try:
+                raw = self.rfile.read(n)
+            except Exception:
+                return {}
+        if not raw:
             return {}
         try:
-            return json.loads(self.rfile.read(n).decode())
+            return json.loads(raw.decode())
         except Exception:
             return {}
 
@@ -880,7 +1157,16 @@ class Handler(BaseHTTPRequestHandler):
                 "engine_error": "" if alive else ENGINE_ERROR,
                 "password": bool(PASSWORD),
                 "download_dir": str(DOWNLOAD_DIR),
+                "platform": PLATFORM,
+                "version": "1.4.0",
             })
+        if path == "/api/win/state":
+            if not self._authed():
+                return self._need_auth()
+            if not WIN_AVAILABLE:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "windows integration unavailable"})
+            return self._json(200, win_state())
         if path == "/api/settings":
             if not self._authed():
                 return self._need_auth()
@@ -978,6 +1264,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                               {"error": "request body too large"},
                               extra={"Connection": "close"})
+        # Read the request body exactly once, up front. Every later
+        # branch - including the 401 auth gate below - must leave the
+        # connection clean: an unread body would be parsed as the next
+        # request on a keep-alive connection and corrupt it (this bit
+        # the browser extension: a 401 for a stale session poisoned
+        # the login retry on the same connection).
+        try:
+            self._raw = self.rfile.read(clen) if clen > 0 else b""
+        except Exception:
+            self._raw = b""
         if path == "/api/login":
             body = self._read_json()
             if not PASSWORD:
@@ -1013,6 +1309,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if not self._authed():
             return self._need_auth()
+        if path in ("/api/win/assoc", "/api/win/autostart"):
+            if not WIN_AVAILABLE:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "windows integration unavailable"})
+            on = bool(self._read_json().get("on"))
+            if path == "/api/win/assoc":
+                return self._json(200, win_set_assoc(on))
+            return self._json(200, win_set_autostart(on))
+        if path == "/api/exit":
+            # Local packages only: an instance bound to a LAN/WAN
+            # address (the server edition) must never be stoppable
+            # from its own UI.
+            if not LOCAL_BIND:
+                return self._json(HTTPStatus.FORBIDDEN,
+                                  {"error": "exit is only available on local packages"})
+            mode = str(self._read_json().get("mode") or "stop")
+            if mode == "full" and WIN_AVAILABLE:
+                try:
+                    win_set_assoc(False)
+                    win_set_autostart(False)
+                except Exception:
+                    pass
+            self._json(200, {"ok": True, "mode": mode})
+            log_event(f"exit requested from UI (mode={mode})")
+            request_shutdown()
+            return
         if path == "/api/settings":
             err = self._merge_settings(self._read_json())
             if err:
@@ -1324,6 +1646,7 @@ def _already_running() -> bool:
 
 
 def main():
+    global HTTPD
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if AUTOSTART:
@@ -1333,6 +1656,7 @@ def main():
     server_cls = DualStackServer if ":" in HOST else ThreadingHTTPServer
     try:
         server = server_cls((HOST, PORT), Handler)
+        HTTPD = server
     except OSError:
         if _already_running():
             print(f"ToFetch 已经在运行了，直接打开 http://localhost:{PORT} 就行，不用重复启动。")
