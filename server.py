@@ -46,7 +46,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -349,6 +349,67 @@ def with_task_defaults(options: dict) -> dict:
     for k, v in load_settings()["task"].items():
         merged.setdefault(k, v)
     return merged
+
+
+def fs_list(raw: str) -> dict:
+    """One level of the local directory tree for the settings folder
+    picker. The web page cannot see local paths, so the backend lists
+    them; the route is Windows-package-only and auth-gated. Directories
+    only — never file names or contents."""
+    drives: list = []
+    if os.name == "nt":
+        try:
+            drives = [str(d) for d in os.listdrives()]
+        except Exception:
+            drives = [f"{c}:\\" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                      if os.path.exists(f"{c}:\\")]
+    if not raw:
+        if os.name == "nt":
+            return {"path": "", "parent": None, "dirs": [], "drives": drives}
+        raw = "/"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        raise ValueError("需要绝对路径")
+    p = p.resolve()
+    if not p.is_dir():
+        raise ValueError("目录不存在")
+    names: list = []
+    try:
+        children = list(p.iterdir())
+    except OSError:
+        raise ValueError("打不开这个目录")
+    for child in children:
+        try:
+            if child.is_dir():
+                names.append(child.name)
+        except OSError:
+            continue
+    names.sort(key=str.lower)
+    if p.parent != p:
+        parent: object = str(p.parent)
+    elif os.name == "nt":
+        parent = ""  # a drive root's parent is the drive list
+    else:
+        parent = None
+    return {"path": str(p), "parent": parent, "dirs": names,
+            "drives": drives}
+
+
+def fs_mkdir(parent_raw: str, name: str) -> dict:
+    """Create a subfolder from the picker; returns the refreshed
+    listing of the parent."""
+    name = (name or "").strip()
+    if (not name or len(name) > 100 or name in (".", "..")
+            or any(c in name for c in '/\\:\x00')):
+        raise ValueError("文件夹名不合法")
+    p = Path(parent_raw).expanduser()
+    if not p.is_absolute():
+        raise ValueError("需要绝对路径")
+    p = p.resolve()
+    if not p.is_dir():
+        raise ValueError("上级目录不存在")
+    (p / name).mkdir(exist_ok=True)
+    return fs_list(str(p))
 
 
 # -------------------------------------------------------------- history
@@ -1268,6 +1329,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.NOT_FOUND,
                                   {"error": "windows integration unavailable"})
             return self._json(200, win_state())
+        if path == "/api/fs":
+            if not self._authed():
+                return self._need_auth()
+            if not WIN_AVAILABLE:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "folder picker unavailable"})
+            q = parse_qs(urlparse(self.path).query)
+            raw = (q.get("path") or [""])[0]
+            try:
+                return self._json(200, fs_list(raw))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if path == "/api/settings":
             if not self._authed():
                 return self._need_auth()
@@ -1410,6 +1483,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if not self._authed():
             return self._need_auth()
+        if path == "/api/fs/mkdir":
+            if not self._authed():
+                return self._need_auth()
+            if not WIN_AVAILABLE:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "folder picker unavailable"})
+            body = self._read_json()
+            try:
+                return self._json(200, fs_mkdir(
+                    str(body.get("path") or ""), str(body.get("name") or "")))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if path in ("/api/win/assoc", "/api/win/autostart"):
             if not WIN_AVAILABLE:
                 return self._json(HTTPStatus.NOT_FOUND,
