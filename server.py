@@ -910,6 +910,23 @@ def _reg_get(path: str, name: str):
         return None
 
 
+def _reg_exe(args) -> bool:
+    """Registry write/delete through reg.exe, a signed system binary.
+    Some machines' association protection silently refuses writes from
+    unsigned processes yet lets reg.exe through (the old .bat
+    registration on the reference machine only ever worked that way),
+    so a winreg failure retries once through reg.exe before giving up.
+    """
+    try:
+        import subprocess
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        r = subprocess.run(["reg.exe"] + args, capture_output=True,
+                           timeout=20, creationflags=flags)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _reg_set(path: str, name: str, value: str) -> bool:
     if FAKE_REGISTRY:
         store = _fake_reg_load()
@@ -935,7 +952,13 @@ def _reg_set(path: str, name: str, value: str) -> bool:
                 winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
         return True
     except Exception:
-        return False
+        pass
+    full = "HKCU\\" + path
+    if name == "":
+        return _reg_exe(["add", full, "/ve", "/t", "REG_SZ",
+                         "/d", value, "/f"])
+    return _reg_exe(["add", full, "/v", name, "/t", "REG_SZ",
+                     "/d", value, "/f"])
 
 
 def _reg_delete_value(path: str, name: str) -> bool:
@@ -952,7 +975,11 @@ def _reg_delete_value(path: str, name: str) -> bool:
             winreg.DeleteValue(k, name)
         return True
     except Exception:
-        return False
+        pass
+    full = "HKCU\\" + path
+    if name == "":
+        return _reg_exe(["delete", full, "/ve", "/f"])
+    return _reg_exe(["delete", full, "/v", name, "/f"])
 
 
 def _reg_delete_tree(path: str) -> bool:
@@ -979,7 +1006,7 @@ def _reg_delete_tree(path: str) -> bool:
         _wipe(path)
         return True
     except Exception:
-        return False
+        return _reg_exe(["delete", "HKCU\\" + path, "/f"])
 
 
 # -- association / autostart state and actions ----------------------------
