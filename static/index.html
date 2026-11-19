@@ -35,7 +35,7 @@
   main{max-width:980px;margin:0 auto;padding:16px}
   .task{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
         padding:12px 14px;margin-bottom:10px}
-  .task .name{font-weight:600;word-break:break-all}
+  .task .name{font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
   .task .meta{color:var(--dim);font-size:12.5px;margin-top:2px;display:flex;gap:12px;flex-wrap:wrap}
   .bar{height:8px;background:var(--panel2);border-radius:99px;margin-top:9px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
@@ -221,6 +221,7 @@
       <button onclick="showSetGroup('android')">安卓策略 ›</button>
       <button onclick="showSetGroup('backup')">备份与数据 ›</button>
       <button onclick="showSetGroup('appearance')">外观 ›</button>
+      <button id="setNavLocal" style="display:none" onclick="showSetGroup('local')">本机集成 ›</button>
     </div>
     <p class="hint" style="margin-top:12px">设置保存在服务器上，重启后自动恢复；清空某项即恢复引擎默认。</p>
   </div>
@@ -326,6 +327,22 @@
         <input type="checkbox" id="appDensity" style="width:auto;margin:0" onchange="setDensity(this.checked)"> 紧凑列表（任务卡片更密）
       </label>
       <p class="hint">外观设置只保存在本机浏览器，立即生效，不用点保存。</p>
+    </div>
+    <div class="set-group" data-group="local">
+      <p class="hint">以下仅在 Windows 本地版生效。开关状态都从系统实时回读，开了就是真开了；改动立即生效，不用点保存。</p>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="winAssoc" style="width:auto;margin:0" onchange="winToggle('assoc', this.checked)"> 磁力链接与 .torrent 文件关联到 ToFetch
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+        <input type="checkbox" id="winAuto" style="width:auto;margin:0" onchange="winToggle('autostart', this.checked)"> 开机自启（后台静默启动，不弹窗）
+      </label>
+      <p class="hint" id="winHints" style="display:none"></p>
+      <label>服务</label>
+      <div style="display:flex;gap:8px">
+        <button onclick="stopService()">停止服务</button>
+        <button class="danger" onclick="exitFull()">退出 ToFetch</button>
+      </div>
+      <p class="hint">停止服务只是停下后台，关联保留，点磁力仍可唤起；「退出」是停服务＋注销关联＋取消自启，全部还给系统。</p>
     </div>
   </div>
   <div class="dlg-btns">
@@ -548,7 +565,7 @@ function render(tasks){
     const fe = t.errorMessage ? friendlyError(t.errorMessage) : null;
     const errMsg = fe ? `<div class="meta" style="color:var(--err)">${esc(fe.t)}</div><div class="meta">${esc(fe.tip)}</div>` : "";
     return `<div class="task ${cls}"><div class="row"><div class="grow">
-      <div class="name">${esc(taskName(t))}</div>
+      <div class="name" title="${esc(taskName(t))}">${esc(taskName(t))}</div>
       <div class="meta">
         <span class="chip ${esc(t.status)}">${STATUS[t.status]||esc(t.status)}</span>
         <span>${fmtBytes(done)} / ${fmtBytes(total)}（${pct.toFixed(1)}%）</span>
@@ -568,6 +585,10 @@ async function refresh(){
     const st = await fetch("/api/state").then(r=>r.json());
     if (st.login){ showLogin(); return; }
     window.__dlDir = st.download_dir || "";
+    if (st.platform === "windows" && !window.__winLocal){
+      window.__winLocal = true;
+      const nb = $("#setNavLocal"); if (nb) nb.style.display = "";
+    }
     $("#dirHint").textContent = st.download_dir ? "下载目录：" + st.download_dir : "";
     const ew = $("#engineWarn");
     if (st.engine){ ew.style.display = "none"; }
@@ -1159,12 +1180,49 @@ async function submitAdd(){
   }catch(e){ alert("添加失败：" + e.message); }
 }
 
+async function refreshWinState(){
+  try{ applyWinState(await getApi("/api/win/state")); }catch(e){}
+}
+function applyWinState(ws){
+  if (!ws) return;
+  const assoc = $("#winAssoc"), auto = $("#winAuto");
+  if (assoc) assoc.checked = !!(ws.magnet && ws.torrent);
+  if (auto) auto.checked = !!ws.autostart;
+  const hints = [];
+  if (ws.magnet !== ws.torrent)
+    hints.push("关联只生效了一半（磁力" + (ws.magnet ? "已开" : "未开") + " / .torrent" + (ws.torrent ? "已开" : "未开") + "），把关联关掉再打开一次试试。");
+  if (ws.userchoice_magnet && !String(ws.userchoice_magnet).toLowerCase().startsWith("tofetch"))
+    hints.push("系统「默认应用」里 MAGNET 被 " + ws.userchoice_magnet + " 占用，它比关联更优先：到 设置 > 应用 > 默认应用 > 按协议，把 MAGNET 改为 ToFetch。");
+  if (ws.userchoice_torrent && !String(ws.userchoice_torrent).toLowerCase().startsWith("tofetch"))
+    hints.push("系统「默认应用」里 .torrent 被 " + ws.userchoice_torrent + " 占用：到 设置 > 应用 > 默认应用 > 按文件类型，把 .torrent 改为 ToFetch。");
+  const el = $("#winHints");
+  if (el){ el.innerHTML = hints.map(h => esc(h)).join("<br>"); el.style.display = hints.length ? "" : "none"; }
+}
+async function winToggle(kind, on){
+  try{
+    const ws = await api(kind === "assoc" ? "/api/win/assoc" : "/api/win/autostart", {on});
+    applyWinState(ws);
+    if (ws && ws.ok === false) alert(ws.error || "操作没有完全生效，开关已按系统实际状态回读。");
+  }catch(e){ alert("操作失败：" + e.message); refreshWinState(); }
+}
+async function stopService(){
+  if (!confirm("停止服务后，所有下载都会停摆，重新打开 ToFetch 才恢复。\n\n确定停止服务？")) return;
+  try{ await api("/api/exit", {mode: "stop"}); }catch(e){}
+  document.body.innerHTML = "<div style='padding:48px;text-align:center'>服务已停止。<br>重新打开 ToFetch 即可恢复下载。</div>";
+}
+async function exitFull(){
+  if (!confirm("退出 ToFetch 将：停止服务、注销磁力与 .torrent 关联、取消开机自启。\n\n退出后无法用 ToFetch 下载，点磁力也不会再唤起 ToFetch；要再用，重新打开 ToFetch、并在设置里重新打开关联即可。\n\n确定退出？")) return;
+  try{ await api("/api/exit", {mode: "full"}); }catch(e){}
+  document.body.innerHTML = "<div style='padding:48px;text-align:center'>ToFetch 已退出，关联与自启已还给系统。</div>";
+}
+
 function showSetGroup(name){
   $("#setHome").style.display = "none";
   $("#setPage").style.display = "";
   document.querySelectorAll(".set-group").forEach(g => { g.style.display = g.dataset.group === name ? "" : "none"; });
-  const titles = {limits: "限速与并发", network: "连接与代理", bt: "BT 与做种", task: "任务默认", schedule: "定时计划", notify: "通知", android: "安卓策略", backup: "备份与数据", appearance: "外观"};
+  const titles = {limits: "限速与并发", network: "连接与代理", bt: "BT 与做种", task: "任务默认", schedule: "定时计划", notify: "通知", android: "安卓策略", backup: "备份与数据", appearance: "外观", local: "本机集成"};
   $("#setTitle").textContent = titles[name] || "设置";
+  if (name === "local") refreshWinState();
 }
 function showSetHome(){
   $("#setPage").style.display = "none";
