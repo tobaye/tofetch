@@ -256,6 +256,8 @@
       <input type="number" id="schTrackerHours" min="1" max="168">
     </div>
     <div class="set-group" data-group="task">
+      <label>下载目录（绝对路径，留空 = 默认；只影响之后新建的任务）</label>
+      <input type="text" id="setDir">
       <label>失败自动重试次数（0 = 不重试）</label>
       <input type="number" id="setTries" min="0" max="100">
       <label>重试间隔（秒）</label>
@@ -1277,6 +1279,8 @@ async function openSettings(){
     $("#setTrackers").value = g["bt-tracker"] || "";
     $("#setSeedRatio").value = g["seed-ratio"] || "";
     $("#setSeedTime").value = g["seed-time"] || "";
+    $("#setDir").value = g["dir"] || "";
+    $("#setDir").placeholder = "当前：" + (pick("dir", "") || "");
     $("#setTries").value = tk["max-tries"] || "";
     $("#setRetryWait").value = tk["retry-wait"] || "";
     const sc = s.schedule || {}, pf = s.prefs || {};
@@ -1321,6 +1325,7 @@ async function submitSettings(){
     "bt-tracker": $("#setTrackers").value.trim(),
     "seed-ratio": $("#setSeedRatio").value.trim(),
     "seed-time": numOr("#setSeedTime"),
+    "dir": $("#setDir").value.trim(),
   };
   const task = {"max-tries": numOr("#setTries"), "retry-wait": numOr("#setRetryWait")};
   const schedule = {};
