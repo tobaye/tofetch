@@ -82,6 +82,7 @@ PORT = int(_env("PORT", "8077"))
 HOST = _env("HOST", "0.0.0.0")
 PASSWORD = _env("PASSWORD", "")
 DOWNLOAD_DIR = Path(_env("DOWNLOAD_DIR", str(ROOT / "downloads"))).resolve()
+LAUNCH_DOWNLOAD_DIR = DOWNLOAD_DIR  # the settings "dir" re-points the root; clearing it reverts here
 DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data"))).resolve()
 RPC_PORT = int(os.environ.get("ARIA2_RPC_PORT", "6800"))
 RPC_URL = f"http://127.0.0.1:{RPC_PORT}/jsonrpc"
@@ -129,7 +130,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 GLOBAL_OPT_KEYS = {
     "max-overall-download-limit", "max-overall-upload-limit",
     "max-concurrent-downloads", "max-connection-per-server", "split",
-    "all-proxy", "bt-tracker", "seed-ratio", "seed-time",
+    "all-proxy", "bt-tracker", "seed-ratio", "seed-time", "dir",
 }
 TASK_OPT_KEYS = {"max-tries", "retry-wait"}
 # Per-task options the add dialog may pass through (advanced section).
@@ -217,6 +218,8 @@ def _valid_setting(key: str, value: str) -> bool:
         return False
     if key in ("all-proxy", "bt-tracker"):
         return True
+    if key == "dir":
+        return len(value) <= 500 and "\x00" not in value
     if key == "seed-ratio":
         try:
             return 0.0 <= float(value) <= 100.0
@@ -313,6 +316,31 @@ def apply_global_settings() -> None:
             log_event("applied saved global settings")
         except Exception:
             pass
+
+
+def set_download_dir(path) -> None:
+    """Re-point the download root. Everything that reads DOWNLOAD_DIR —
+    /api/state, the per-task dir sandbox, history paths — follows at
+    once; the engine's global dir is pushed separately by
+    apply_global_settings / the settings handler."""
+    global DOWNLOAD_DIR
+    DOWNLOAD_DIR = Path(path)
+
+
+def boot_download_dir() -> None:
+    """At startup, adopt the persisted settings dir before the engine
+    launches with --dir=<root>. A stale or unwritable value must not
+    brick the boot: fall back to the launch dir."""
+    want = load_settings()["global"].get("dir")
+    if not want:
+        return
+    try:
+        p = Path(want).expanduser().resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        if p.is_dir():
+            set_download_dir(p)
+    except Exception:
+        pass
 
 
 def with_task_defaults(options: dict) -> dict:
@@ -673,12 +701,30 @@ def stop_aria2() -> None:
         rpc_call("aria2.saveSession", [], timeout=3)
     except Exception:
         pass
+    # The engine may have been started by an earlier backend generation
+    # and only adopted by this one (_aria2_proc is None in that case) —
+    # an RPC shutdown reaches it no matter who spawned it. Without this,
+    # exiting ToFetch left an orphaned aria2 process behind holding the
+    # program folder open (field report 2026-11-19).
+    try:
+        rpc_call("aria2.shutdown", [], timeout=3)
+    except Exception:
+        pass
     if _aria2_proc and _aria2_proc.poll() is None:
-        _aria2_proc.terminate()
         try:
-            _aria2_proc.wait(timeout=5)
+            _aria2_proc.wait(timeout=3)
         except Exception:
-            _aria2_proc.kill()
+            pass
+    if _aria2_proc and _aria2_proc.poll() is None:
+        try:
+            _aria2_proc.terminate()
+            _aria2_proc.wait(timeout=3)
+        except Exception:
+            try:
+                _aria2_proc.kill()
+            except Exception:
+                pass
+    _aria2_proc = None
 
 
 
@@ -1474,6 +1520,8 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return "settings object required"
         settings = load_settings()
+        dir_new = None        # resolved Path when global.dir is being set
+        dir_touched = False   # global.dir present in this body (set or cleared)
         for group, keys in (("global", GLOBAL_OPT_KEYS), ("task", TASK_OPT_KEYS)):
             vals = body.get(group)
             if isinstance(vals, dict):
@@ -1481,6 +1529,24 @@ class Handler(BaseHTTPRequestHandler):
                     if k not in keys:
                         return f"unknown setting: {k}"
                     v = str(v).strip()
+                    if group == "global" and k == "dir":
+                        dir_touched = True
+                        if v == "":
+                            settings[group].pop(k, None)
+                            continue
+                        # Validate for real: the dir must exist or be
+                        # creatable, otherwise refuse the whole save
+                        # instead of persisting a root nothing can use.
+                        try:
+                            p = Path(v).expanduser().resolve()
+                            p.mkdir(parents=True, exist_ok=True)
+                            if not p.is_dir():
+                                return "bad value for dir"
+                        except Exception:
+                            return "bad value for dir"
+                        dir_new = p
+                        settings[group][k] = str(p)
+                        continue
                     if v == "":
                         settings[group].pop(k, None)  # empty = engine default
                     elif _valid_setting(k, v):
@@ -1504,6 +1570,20 @@ class Handler(BaseHTTPRequestHandler):
                     settings["prefs"][k] = v
         save_settings(settings)
         apply_global_settings()
+        if dir_touched:
+            if dir_new is not None:
+                set_download_dir(dir_new)
+            else:
+                # Cleared: the sandbox/state root reverts at once, and
+                # the engine needs an explicit push — the saved settings
+                # no longer carry a dir for apply_global_settings.
+                set_download_dir(LAUNCH_DOWNLOAD_DIR)
+                if rpc_alive():
+                    try:
+                        rpc_call("aria2.changeGlobalOption",
+                                 [{"dir": str(LAUNCH_DOWNLOAD_DIR)}], timeout=5)
+                    except Exception:
+                        pass
         return None
 
     def _remove_files(self):
@@ -1702,6 +1782,7 @@ def _already_running() -> bool:
 
 def main():
     global HTTPD
+    boot_download_dir()
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if AUTOSTART:
