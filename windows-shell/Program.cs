@@ -197,6 +197,9 @@ namespace ToFetchPanel
         private readonly bool _startHidden;
         private bool _running;
         private bool _userStopped;
+        private bool _stopArmed;
+        private bool _exitArmed;
+        private readonly System.Windows.Forms.Timer _armTimer = new System.Windows.Forms.Timer();
         private bool _reallyExit;
         private bool _balloonShown;
         private bool _syncing;   // setting toggles from verified state
@@ -327,12 +330,14 @@ namespace ToFetchPanel
                 Log(r != null ? "✓ 已暂停全部任务" : "✗ 暂停全部失败（服务未运行或设了密码）");
             });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("退出 ToFetch", null, (s, e) => FullExit());
+            menu.Items.Add("退出 ToFetch", null, (s, e) => FullExitFromTray());
             _tray.ContextMenuStrip = menu;
 
             _timer.Interval = 2000;
             _timer.Tick += (s, e) => RefreshState();
             _timer.Start();
+            _armTimer.Interval = 4000;
+            _armTimer.Tick += (s, e) => DisarmConfirms();
 
             Shown += async (s, e) =>
             {
@@ -437,12 +442,38 @@ namespace ToFetchPanel
                    : "✗ " + what + "没有完全生效：" + Api.Str(ws, "error") + "（开关已按实际状态回读）");
         }
 
+        // Two-step confirms on the buttons themselves: a modal dialog
+        // can land its buttons exactly under the click that opened it
+        // and be dismissed by that same click's release (on the
+        // reference machine the stop dialog just "flashed" and never
+        // acted). First click arms the button and explains in the log;
+        // a second click within a few seconds executes.
+        private void DisarmConfirms()
+        {
+            _armTimer.Stop();
+            _stopArmed = false;
+            _exitArmed = false;
+            _btnStop.Text = "停止服务";
+            _btnExit.Text = "退出 ToFetch";
+        }
+
+        private void ArmConfirm(bool stop)
+        {
+            if (stop) { _stopArmed = true; _btnStop.Text = "确定停止？"; }
+            else { _exitArmed = true; _btnExit.Text = "确定退出？"; }
+            _armTimer.Stop();
+            _armTimer.Start();
+        }
+
         private void StopService()
         {
-            if (MessageBox.Show(this,
-                    "停止服务后，所有下载都会停摆，重新打开 ToFetch 才恢复。\n\n确定停止服务？",
-                    "停止服务", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+            if (!_stopArmed)
+            {
+                ArmConfirm(true);
+                Log("提醒：停止服务后，所有下载都会停摆，重新打开 ToFetch 才恢复。再点一次「确定停止？」执行");
                 return;
+            }
+            DisarmConfirms();
             Api.Post("/api/exit", new Dictionary<string, object> { { "mode", "stop" } }, 5000);
             _userStopped = true;
             Log("✓ 服务已停止");
@@ -450,12 +481,30 @@ namespace ToFetchPanel
             RefreshState();
         }
 
-        private async void FullExit()
+        private void FullExit()
         {
+            if (!_exitArmed)
+            {
+                ArmConfirm(false);
+                Log("提醒：退出将停止服务、注销磁力与 .torrent 关联、取消开机自启，全部还给系统。再点一次「确定退出？」执行");
+                return;
+            }
+            FullExitNow();
+        }
+
+        private void FullExitFromTray()
+        {
+            ShowPanel();
             if (MessageBox.Show(this,
                     "退出 ToFetch 将：停止服务、注销磁力与 .torrent 关联、取消开机自启。\n\n退出后无法用 ToFetch 下载，点磁力也不会再唤起 ToFetch；要再用，重新打开 ToFetch、并在面板里重新打开关联即可。\n\n确定退出？",
                     "退出 ToFetch", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
                 return;
+            FullExitNow();
+        }
+
+        private async void FullExitNow()
+        {
+            DisarmConfirms();
             if (!Backend.IsUp()) await Task.Run(() => Backend.EnsureStarted());
             Api.Post("/api/exit", new Dictionary<string, object> { { "mode", "full" } }, 8000);
             Log("✓ 已退出，关联与自启已还给系统");
