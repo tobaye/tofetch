@@ -24,6 +24,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace ToFetchPanel
 {
@@ -101,6 +102,112 @@ namespace ToFetchPanel
         }
     }
 
+    internal sealed class BrowserChoice
+    {
+        public string Name = "";
+        public string Exe = "";   // "" = system default browser
+        public override string ToString() { return Name; }
+    }
+
+    internal static class Browsers
+    {
+        // Which browser opens the download UI. Chosen in the panel,
+        // stored as one named value under HKCU\Software\ToFetch.
+        private const string RegKey = @"Software\ToFetch";
+        private const string RegVal = "Browser";
+
+        public static string SavedExe()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(RegKey))
+                {
+                    var v = k == null ? null : k.GetValue(RegVal) as string;
+                    return v ?? "";
+                }
+            }
+            catch { return ""; }
+        }
+
+        public static void Save(string exe)
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(RegKey))
+                {
+                    if (k != null) k.SetValue(RegVal, exe ?? "", RegistryValueKind.String);
+                }
+            }
+            catch { }
+        }
+
+        public static List<BrowserChoice> Installed()
+        {
+            var list = new List<BrowserChoice>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var root in new[] { Registry.LocalMachine, Registry.CurrentUser })
+            {
+                try
+                {
+                    using (var clients = root.OpenSubKey(@"Software\Clients\StartMenuInternet"))
+                    {
+                        if (clients == null) continue;
+                        foreach (var sub in clients.GetSubKeyNames())
+                        {
+                            try
+                            {
+                                using (var ck = clients.OpenSubKey(sub))
+                                {
+                                    if (ck == null) continue;
+                                    var disp = ck.GetValue("") as string;
+                                    string exe = null;
+                                    using (var cmd = ck.OpenSubKey(@"shell\open\command"))
+                                    {
+                                        var c = cmd == null ? null : cmd.GetValue("") as string;
+                                        exe = ExtractExe(c);
+                                    }
+                                    if (exe != null && File.Exists(exe) && seen.Add(exe))
+                                        list.Add(new BrowserChoice { Name = string.IsNullOrEmpty(disp) ? sub : disp, Exe = exe });
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+            return list;
+        }
+
+        private static string ExtractExe(string cmd)
+        {
+            if (string.IsNullOrWhiteSpace(cmd)) return null;
+            cmd = cmd.Trim();
+            if (cmd.StartsWith("\""))
+            {
+                int j = cmd.IndexOf('"', 1);
+                return j > 1 ? cmd.Substring(1, j - 1) : null;
+            }
+            int sp = cmd.IndexOf(' ');
+            return sp > 0 ? cmd.Substring(0, sp) : cmd;
+        }
+
+        public static void Open(string url)
+        {
+            var exe = SavedExe();
+            if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo { FileName = exe, Arguments = "\"" + url + "\"", UseShellExecute = false });
+                    return;
+                }
+                catch { }
+            }
+            try { Process.Start(url); } catch { }
+        }
+    }
+
     internal static class Backend
     {
         public static bool IsUp()
@@ -145,7 +252,7 @@ namespace ToFetchPanel
 
         public static void OpenUi()
         {
-            try { Process.Start(Cfg.Base + "/"); } catch { }
+            Browsers.Open(Cfg.Base + "/");
         }
     }
 
@@ -190,6 +297,8 @@ namespace ToFetchPanel
         private readonly Button _btnExit = new Button();
         private readonly CheckBox _chkAssoc = new CheckBox();
         private readonly CheckBox _chkAuto = new CheckBox();
+        private readonly ComboBox _cmbBrowser = new ComboBox();
+        private bool _syncingBrowser;
         private readonly Label _ucHint = new Label();
         private readonly TextBox _log = new TextBox();
         private readonly NotifyIcon _tray = new NotifyIcon();
@@ -211,7 +320,7 @@ namespace ToFetchPanel
             _startHidden = startHidden;
             Text = "ToFetch 控制面板";
             Font = new Font("Microsoft YaHei UI", 9f);
-            ClientSize = new Size(520, 545);
+            ClientSize = new Size(520, 575);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -275,7 +384,7 @@ namespace ToFetchPanel
             _btnStop.Click += (s, e) => StopService();
             Controls.AddRange(new Control[] { _btnOpen, _btnStart, _btnStop });
 
-            var gLocal = new GroupBox { Text = "本机集成（状态实时回读，改动立即生效）", Location = new Point(12, 206), Size = new Size(496, 104) };
+            var gLocal = new GroupBox { Text = "本机集成（状态实时回读，改动立即生效）", Location = new Point(12, 206), Size = new Size(496, 136) };
             _chkAssoc.Text = "磁力链接与 .torrent 文件关联到 ToFetch";
             _chkAssoc.AutoSize = true;
             _chkAssoc.Location = new Point(14, 24);
@@ -284,15 +393,28 @@ namespace ToFetchPanel
             _chkAuto.AutoSize = true;
             _chkAuto.Location = new Point(14, 48);
             _chkAuto.CheckedChanged += async (s, e) => { if (!_syncing) await Toggle("autostart", _chkAuto.Checked); };
+            var browserLabel = new Label { Text = "打开界面用的浏览器：", AutoSize = true, Location = new Point(14, 76) };
+            _cmbBrowser.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbBrowser.Location = new Point(150, 72);
+            _cmbBrowser.Size = new Size(220, 24);
+            _cmbBrowser.SelectedIndexChanged += (s, e) =>
+            {
+                if (_syncingBrowser) return;
+                var bc = _cmbBrowser.SelectedItem as BrowserChoice;
+                if (bc == null) return;
+                Browsers.Save(bc.Exe);
+                Log("打开界面浏览器：" + bc.Name);
+            };
             _ucHint.ForeColor = Color.DarkGoldenrod;
             _ucHint.AutoSize = false;
-            _ucHint.Location = new Point(14, 72);
+            _ucHint.Location = new Point(14, 102);
             _ucHint.Size = new Size(468, 28);
-            gLocal.Controls.AddRange(new Control[] { _chkAssoc, _chkAuto, _ucHint });
+            gLocal.Controls.AddRange(new Control[] { _chkAssoc, _chkAuto, browserLabel, _cmbBrowser, _ucHint });
             Controls.Add(gLocal);
+            InitBrowserCombo();
 
             _btnExit.Text = "退出 ToFetch";
-            _btnExit.Location = new Point(378, 322);
+            _btnExit.Location = new Point(378, 352);
             _btnExit.Size = new Size(130, 30);
             _btnExit.Click += (s, e) => FullExit();
             Controls.Add(_btnExit);
@@ -301,11 +423,11 @@ namespace ToFetchPanel
                 Text = "退出 = 停服务＋注销关联＋取消自启，全部还给系统。",
                 ForeColor = Color.Gray,
                 AutoSize = true,
-                Location = new Point(12, 330),
+                Location = new Point(12, 360),
             };
             Controls.Add(exitHint);
 
-            var gLog = new GroupBox { Text = "记录", Location = new Point(12, 362), Size = new Size(496, 170) };
+            var gLog = new GroupBox { Text = "记录", Location = new Point(12, 392), Size = new Size(496, 170) };
             _log.Multiline = true;
             _log.ReadOnly = true;
             _log.ScrollBars = ScrollBars.Vertical;
@@ -398,6 +520,23 @@ namespace ToFetchPanel
                 var ws = Api.Get("/api/win/state", 2000);
                 if (ws != null) ApplyWinState(ws);
             }
+        }
+
+        private void InitBrowserCombo()
+        {
+            _syncingBrowser = true;
+            _cmbBrowser.Items.Clear();
+            _cmbBrowser.Items.Add(new BrowserChoice { Name = "系统默认", Exe = "" });
+            foreach (var b in Browsers.Installed()) _cmbBrowser.Items.Add(b);
+            var saved = Browsers.SavedExe();
+            int sel = 0;
+            for (int i = 0; i < _cmbBrowser.Items.Count; i++)
+            {
+                var bc = _cmbBrowser.Items[i] as BrowserChoice;
+                if (bc != null && string.Equals(bc.Exe, saved, StringComparison.OrdinalIgnoreCase)) { sel = i; break; }
+            }
+            _cmbBrowser.SelectedIndex = sel;
+            _syncingBrowser = false;
         }
 
         private void ApplyWinState(Dictionary<string, object> ws)
