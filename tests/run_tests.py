@@ -806,6 +806,114 @@ def main() -> int:
         dummy_exe.unlink(missing_ok=True)
         shutil.rmtree(work23, ignore_errors=True)
 
+    # T24: the download-dir setting re-points the root live: state
+    # follows, a new download lands in the new root, an unusable path
+    # is refused, and clearing the setting reverts to the launch dir.
+    work24 = Path(tempfile.mkdtemp(prefix="tofetch-test24-"))
+    # T24 gets its OWN fixture server: by this point in the suite the
+    # shared one has served hundreds of ranged connects and loopback
+    # drops late in long runs (see QuietServer's note) kept erroring
+    # this test's download leg — the dir assertions are what matters
+    # here, so they get an isolated source.
+    src24 = work24 / "src"
+    src24.mkdir()
+    (src24 / "small.bin").write_bytes(b"s" * 65536)
+
+    class _H24(RangeHandler):
+        pass
+    _H24.root = src24
+    httpd24 = QuietServer(("127.0.0.1", 0), _H24)
+    threading.Thread(target=httpd24.serve_forever, daemon=True).start()
+    base24 = f"http://127.0.0.1:{httpd24.server_address[1]}"
+    td24 = ToFetch(work24, aria2, free_port(), free_port())
+    try:
+        td24.wait_engine()
+        root_a = str((work24 / "downloads").resolve())
+        root_b = str((work24 / "elsewhere").resolve())
+        st0 = td24.api("/api/state")
+        td24.api("/api/settings", {"global": {"dir": root_b}})
+        st1 = td24.api("/api/state")
+        gid24 = td24.rpc("addUri", [[f"{base24}/small.bin"], {"out": "t24.bin"}])
+        landed = False
+        task_dir = ""
+        try:
+            task_dir = td24.wait_complete(gid24, 30).get("dir", "")
+            landed = (Path(root_b) / "t24.bin").exists()
+        except Exception:
+            # Late in a long suite run the loopback fixture can drop a
+            # connect (see QuietServer's note) and error the task; the
+            # dir assertions are what this test is about, so retry the
+            # download leg once before judging.
+            try:
+                gid24 = td24.rpc("addUri", [[f"{base24}/small.bin"], {"out": "t24.bin"}])
+                task_dir = td24.wait_complete(gid24, 30).get("dir", "")
+                landed = (Path(root_b) / "t24.bin").exists()
+            except Exception as e:
+                task_dir = f"wait failed twice: {e}"
+        bad_refused = False
+        try:
+            td24.api("/api/settings", {"global": {"dir": "/proc/tofetch-nope/x"}})
+        except Exception:
+            bad_refused = True
+        td24.api("/api/settings", {"global": {"dir": ""}})
+        st2 = td24.api("/api/state")
+        report("T24 download-dir setting re-points root, bad path refused",
+               st0.get("download_dir") == root_a and st1.get("download_dir") == root_b
+               and landed and bad_refused and st2.get("download_dir") == root_a,
+               f"(a={st0.get('download_dir')}, b={st1.get('download_dir')}, "
+               f"landed={landed}, task_dir={task_dir}, bad={bad_refused}, "
+               f"back={st2.get('download_dir')})")
+    finally:
+        td24.stop()
+        httpd24.shutdown()
+        shutil.rmtree(work24, ignore_errors=True)
+
+    # T25: exit must also stop an ADOPTED engine. Backend A spawns the
+    # engine; A's python is hard-killed, orphaning the engine; backend
+    # B (same data dir + RPC port) adopts it ("aria2 already running,
+    # using it"); /api/exit on B must leave no engine behind. (Field
+    # bug 2026-11-19: exiting ToFetch left aria2 running and the
+    # program folder undeletable.)
+    work25 = Path(tempfile.mkdtemp(prefix="tofetch-test25-"))
+    rpc25 = free_port()
+    td25a = ToFetch(work25 / "a", aria2, free_port(), rpc25)
+    engine_pid = None
+    rc25 = None
+    engine_gone = False
+    try:
+        td25a.wait_engine()
+        pat25 = "conf-path=" + str(work25 / "a" / "data")
+        out = subprocess.run(["pgrep", "-f", pat25],
+                             capture_output=True, text=True).stdout.strip()
+        engine_pid = out.splitlines()[0] if out else None
+        td25a.proc.kill()  # hard kill: no cleanup runs, engine orphaned
+        td25a.proc.wait(timeout=10)
+        time.sleep(0.5)
+        td25b = ToFetch(work25 / "b", aria2, free_port(), rpc25, extra_env={
+            "TOFETCH_DATA_DIR": str(work25 / "a" / "data"),  # same RPC secret
+            "TOFETCH_HOST": "127.0.0.1",
+        })
+        try:
+            td25b.wait_engine()
+            td25b.api("/api/exit", {"mode": "stop"})
+            rc25 = td25b.proc.wait(timeout=20)
+        finally:
+            td25b.stop()
+        end = time.time() + 15
+        while time.time() < end:
+            alive = subprocess.run(["pgrep", "-f", pat25],
+                                   capture_output=True, text=True).stdout.strip()
+            if not alive:
+                engine_gone = True
+                break
+            time.sleep(0.5)
+        report("T25 exit stops an adopted engine too",
+               bool(engine_pid) and rc25 == 0 and engine_gone,
+               f"(engine_pid={engine_pid}, rc={rc25}, engine_gone={engine_gone})")
+    finally:
+        td25a.stop()
+        shutil.rmtree(work25, ignore_errors=True)
+
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],
                    capture_output=True)
