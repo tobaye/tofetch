@@ -107,6 +107,12 @@ def main() -> int:
     shutil.copy2(blobs["aria2-win.exe"], win / "aria2c.exe")
     for f in (PKGF / "windows").iterdir():
         shutil.copy2(f, win / f.name)
+        if f.suffix.lower() == ".bat":
+            # cmd.exe mangles LF-only batch files (lost leading chars,
+            # garbage commands); force CRLF in the shipped package
+            # regardless of the source file's line endings.
+            p = win / f.name
+            p.write_bytes(p.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
     zip_dir(win, "ToFetch", DIST / "ToFetch-Windows.zip", exec_names=set())
 
     # ---- Linux: ToFetch-Linux/
