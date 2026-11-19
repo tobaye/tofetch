@@ -914,6 +914,59 @@ def main() -> int:
         td25a.stop()
         shutil.rmtree(work25, ignore_errors=True)
 
+    # T26: folder picker listing — windows platform only, dirs only
+    work26 = Path(tempfile.mkdtemp(prefix="tofetch-test26-"))
+    (work26 / "alpha").mkdir()
+    (work26 / "beta").mkdir()
+    (work26 / "a-file.txt").write_text("not a dir")
+    td26 = ToFetch(work26, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PLATFORM": "windows",
+        "TOFETCH_FAKE_REGISTRY": "1",
+    })
+    td26o = ToFetch(Path(tempfile.mkdtemp(prefix="tofetch-test26o-")),
+                    aria2, free_port(), free_port())
+    def _get26(inst, path):
+        for _try in range(12):
+            try:
+                with urllib.request.urlopen(inst.ui + path, timeout=10) as r:
+                    return r.status, json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+            except Exception:
+                time.sleep(0.5)  # instance still binding its port
+        return 0, {}
+    try:
+        st, d = _get26(td26, "/api/fs?path=" + str(work26))
+        ok_list = (st == 200 and d.get("path") == str(work26)
+                   and "alpha" in d.get("dirs", [])
+                   and "beta" in d.get("dirs", [])
+                   and "a-file.txt" not in d.get("dirs", [])
+                   and d.get("parent") == str(work26.parent))
+        st2, d2 = _get26(td26, "/api/fs?path=")
+        ok_root = (st2 == 200 and d2.get("path") == "/"
+                   and "tmp" in d2.get("dirs", []))
+        st3, _ = _get26(td26, "/api/fs?path=/nonexistent-xyz-26")
+        ok_missing = st3 == 400
+        st4, _ = _get26(td26o, "/api/fs?path=/tmp")
+        ok_gated = st4 == 404  # non-windows package: no picker route
+        mk = td26.api("/api/fs/mkdir", {"path": str(work26), "name": "gamma"})
+        ok_mkdir = ("gamma" in mk.get("dirs", [])
+                    and (work26 / "gamma").is_dir())
+        ok_badname = False
+        try:
+            td26.api("/api/fs/mkdir", {"path": str(work26), "name": "../evil"})
+        except Exception:
+            ok_badname = True
+        report("T26 folder picker lists dirs, windows only",
+               ok_list and ok_root and ok_missing and ok_gated
+               and ok_mkdir and ok_badname,
+               f"(list={ok_list}, root={ok_root}, missing={ok_missing}, "
+               f"gated={ok_gated}, mkdir={ok_mkdir}, badname={ok_badname})")
+    finally:
+        td26.stop()
+        td26o.stop()
+        shutil.rmtree(work26, ignore_errors=True)
+
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],
                    capture_output=True)
