@@ -74,16 +74,16 @@ jobs:
           TOFETCH_KEY_PASS: ${{ secrets.TOFETCH_KEY_PASS }}
         run: gradle assembleRelease --stacktrace
 
-- name: Attach APK to the release
-  env:
-    GH_TOKEN: ${{ github.token }}
-  run: |
-    apk=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
-    echo "built: $apk"
-    cp "$apk" ToFetch-Android.apk
-    ver=$(grep -oP "versionName '\K[^']+" android/app/build.gradle)
-    tag="v$ver"
-    gh release upload "$tag" ToFetch-Android.apk --clobber || \
-      gh release create "$tag" --title "ToFetch $ver" \
-        --notes "ToFetch $ver - a tiny self-hosted download manager (aria2 engine, zero-dependency Python core, single-file web UI). Android APK (release-signed with the permanent keystore), plus server / Windows / Linux / Termux packages." \
-        ToFetch-Android.apk
+      - name: Attach APK to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          echo "built: $apk"
+          cp "$apk" ToFetch-Android.apk
+          ver=$(grep -oP "versionName '\K[^']+" android/app/build.gradle)
+          tag="v$ver"
+          gh release upload "$tag" ToFetch-Android.apk --clobber || \
+            gh release create "$tag" --title "ToFetch $ver" \
+              --notes "ToFetch $ver - a tiny self-hosted download manager (aria2 engine, zero-dependency Python core, single-file web UI). Android APK (release-signed with the permanent keystore), plus server / Windows / Linux / Termux packages." \
+              ToFetch-Android.apk
