@@ -1360,6 +1360,7 @@ async function openSettings(){
     $("#setSeedRatio").value = g["seed-ratio"] || "";
     $("#setSeedTime").value = g["seed-time"] || "";
     $("#setDir").value = g["dir"] || "";
+    window.__savedDir = g["dir"] || "";
     $("#setDir").placeholder = "当前：" + (pick("dir", "") || "");
     $("#setTries").value = tk["max-tries"] || "";
     $("#setRetryWait").value = tk["retry-wait"] || "";
@@ -1394,6 +1395,13 @@ async function openSettings(){
   if (!setDlg.open) setDlg.showModal();
 }
 async function submitSettings(){
+  let dirVal = $("#setDir").value.trim().replace(/^"+|"+$/g, "");
+  if (dirVal && window.__winLocal){
+    let exists = false;
+    try { const r = await fetch("/api/fs?path=" + encodeURIComponent(dirVal)); exists = r.ok; } catch(e){}
+    if (!exists && !confirm("文件夹不存在：\n" + dirVal + "\n\n是否新建？"))
+      dirVal = window.__savedDir || "";
+  }
   const numOr = id => { const v = $(id).value.trim(); return v === "" ? "" : String(Math.max(0, parseInt(v)||0)); };
   const global = {
     "max-overall-download-limit": String(Math.max(0, +$("#setDown").value||0)*1024),
@@ -1405,7 +1413,7 @@ async function submitSettings(){
     "bt-tracker": $("#setTrackers").value.trim(),
     "seed-ratio": $("#setSeedRatio").value.trim(),
     "seed-time": numOr("#setSeedTime"),
-    "dir": $("#setDir").value.trim(),
+    "dir": dirVal,
   };
   const task = {"max-tries": numOr("#setTries"), "retry-wait": numOr("#setRetryWait")};
   const schedule = {};
