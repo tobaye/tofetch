@@ -715,6 +715,97 @@ def main() -> int:
         td12.stop()
         shutil.rmtree(work12, ignore_errors=True)
 
+    # T22: an unauthenticated POST's body must be drained before the
+    # 401 goes out - leftover bytes would be parsed as the next request
+    # on the same keep-alive connection and corrupt it (the browser
+    # extension bug: a stale-session 401 poisoned the login retry).
+    import http.client
+    work22 = Path(tempfile.mkdtemp(prefix="tofetch-test22-"))
+    td22 = ToFetch(work22, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PASSWORD": "test-pw-22",
+    })
+    try:
+        port22 = int(td22.ui.rsplit(":", 1)[1])
+        up = False
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(td22.ui + "/api/state", timeout=3)
+            except urllib.error.HTTPError as e:
+                up = e.code == 401
+                if up:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        conn = http.client.HTTPConnection("127.0.0.1", port22, timeout=10)
+
+        def one(method, path, body=None, cookie=None):
+            data = json.dumps(body).encode() if body is not None else None
+            headers = {"Content-Type": "application/json"}
+            if cookie:
+                headers["Cookie"] = cookie
+            conn.request(method, path, data, headers)
+            r = conn.getresponse()
+            return r.status, r.getheader("Set-Cookie"), r.read()
+
+        c1, _, _ = one("POST", "/api/settings", {"global": {}})
+        c2, set_cookie, _ = one("POST", "/api/login", {"password": "test-pw-22"})
+        cookie22 = (set_cookie or "").split(";")[0]
+        c3, _, raw3 = one("GET", "/api/state", None, cookie22)
+        report("T22 unauthenticated body drained: keep-alive login after 401 works",
+               up and c1 == 401 and c2 == 200 and c3 == 200 and b'"engine"' in raw3,
+               f"(up={up}, c1={c1}, c2={c2}, c3={c3})")
+        conn.close()
+    finally:
+        td22.stop()
+        shutil.rmtree(work22, ignore_errors=True)
+
+    # T23: Windows integration against the fake registry - verified
+    # assoc/autostart toggles; /api/exit refuses on a WAN-bound
+    # instance (the main td) and really exits a loopback-bound one.
+    work23 = Path(tempfile.mkdtemp(prefix="tofetch-test23-"))
+    dummy_exe = ROOT / "ToFetch.exe"
+    dummy_exe.write_bytes(b"test stand-in for the control panel")
+    td23 = ToFetch(work23, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PLATFORM": "windows",
+        "TOFETCH_FAKE_REGISTRY": str(work23 / "reg.json"),
+        "TOFETCH_HOST": "127.0.0.1",
+    })
+    try:
+        td23.wait_engine()
+
+        def win_state():
+            with urllib.request.urlopen(td23.ui + "/api/win/state", timeout=10) as r:
+                return json.loads(r.read().decode())
+
+        st0 = win_state()
+        r_on = td23.api("/api/win/assoc", {"on": True})
+        r_auto = td23.api("/api/win/autostart", {"on": True})
+        st1 = win_state()
+        r_off = td23.api("/api/win/assoc", {"on": False})
+        r_auto_off = td23.api("/api/win/autostart", {"on": False})
+        toggles_ok = (st0["magnet"] is False and st0["autostart"] is False
+                      and r_on.get("ok") and r_auto.get("ok")
+                      and st1["magnet"] and st1["torrent"] and st1["autostart"]
+                      and r_off.get("ok") and r_auto_off.get("ok"))
+        try:
+            td.api("/api/exit", {"mode": "stop"})
+            gate_ok = False
+        except Exception:
+            gate_ok = True  # 403 on the 0.0.0.0-bound main instance
+        td23.api("/api/exit", {"mode": "stop"})
+        try:
+            rc23 = td23.proc.wait(timeout=15)
+        except Exception:
+            rc23 = None
+        report("T23 win toggles verified; exit gated to local, loopback exits",
+               toggles_ok and gate_ok and rc23 == 0,
+               f"(toggles={toggles_ok}, gate={gate_ok}, rc={rc23})")
+    finally:
+        td23.stop()
+        dummy_exe.unlink(missing_ok=True)
+        shutil.rmtree(work23, ignore_errors=True)
+
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],
                    capture_output=True)
