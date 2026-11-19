@@ -919,13 +919,16 @@ def _reg_set(path: str, name: str, value: str) -> bool:
     try:
         import winreg
         if name == "":
-            # SetValue on the parent handle sets the subkey's default
-            # value (and creates it) - the reliable route for the
-            # unnamed value, dodging SetValueEx's None-name quirks.
-            parent, _, leaf = path.rpartition("\\")
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, parent, 0,
-                                winreg.KEY_SET_VALUE) as pk:
-                winreg.SetValue(pk, leaf, winreg.REG_SZ, value)
+            # Default value: create/open the FULL key path, then
+            # SetValue with an empty subkey name sets that key's own
+            # default. (Field bug, 2026-11-19: the previous route opened
+            # the PARENT with KEY_SET_VALUE only, but SetValue there
+            # must CREATE the subkey, which needs KEY_CREATE_SUB_KEY -
+            # every association write died on its first call while the
+            # named-value writes (capabilities) went through.)
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                winreg.SetValue(k, "", winreg.REG_SZ, value)
         else:
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0,
                                     winreg.KEY_SET_VALUE) as k:
