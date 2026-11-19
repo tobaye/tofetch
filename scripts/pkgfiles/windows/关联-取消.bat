@@ -1,7 +1,9 @@
 @echo off
-chcp 65001 >nul
-reg delete "HKCU\Software\Classes\magnet" /f 2>nul
-reg delete "HKCU\Software\Classes\.torrent" /f 2>nul
-reg delete "HKCU\Software\Classes\ToFetch.torrent" /f 2>nul
-echo 已取消磁力链接和 .torrent 文件与 ToFetch 的关联。
+reg delete "HKCU\Software\Classes\magnet" /f >nul 2>&1
+reg delete "HKCU\Software\Classes\ToFetch.magnet" /f >nul 2>&1
+reg delete "HKCU\Software\Classes\.torrent" /f >nul 2>&1
+reg delete "HKCU\Software\Classes\ToFetch.torrent" /f >nul 2>&1
+reg delete "HKCU\Software\ToFetch" /f >nul 2>&1
+reg delete "HKCU\Software\RegisteredApplications" /v "ToFetch" /f >nul 2>&1
+echo Done: magnet links and .torrent files are no longer associated with ToFetch.
 pause
