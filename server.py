@@ -285,7 +285,7 @@ def rpc_call(method: str, params: list, timeout: float = 15.0):
 
 def rpc_alive() -> bool:
     try:
-        rpc_call("aria2.getVersion", [], timeout=3)
+        rpc_call("aria2.getVersion", [], timeout=1)
         return True
     except Exception:
         return False
@@ -622,8 +622,17 @@ def start_aria2() -> None:
         logf = aria2_log.open("ab")
     except OSError:
         logf = subprocess.DEVNULL
+    popen_kw = {}
+    if os.name == "nt":
+        # aria2c is a console program: when the backend itself runs
+        # windowless (pythonw, launched by the panel or the opener),
+        # Windows would give the engine a visible black console window
+        # that looks like a hang. CREATE_NO_WINDOW keeps it hidden.
+        popen_kw["creationflags"] = getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
-        _aria2_proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT)
+        _aria2_proc = subprocess.Popen(args, stdout=logf,
+                                       stderr=subprocess.STDOUT, **popen_kw)
     except OSError as exc:
         ENGINE_ERROR = f"引擎启动失败：{binary} 无法执行（{exc.strerror or exc}）。常见原因：二进制与设备架构不匹配（如 x86_64 机器上放了 arm64 版）"
         log_event(ENGINE_ERROR)
@@ -1650,8 +1659,16 @@ def main():
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if AUTOSTART:
-        start_aria2()
-    apply_global_settings()
+        # Engine startup must never block the web UI: on some machines
+        # aria2 takes a long while to answer RPC (or never does), and a
+        # synchronous start made the whole program look dead — the port
+        # stayed unbound and every client kept polling a dead address.
+        # Serve first; the engine joins when it is ready, then the saved
+        # global settings are pushed to it.
+        def _engine_boot():
+            start_aria2()
+            apply_global_settings()
+        threading.Thread(target=_engine_boot, daemon=True).start()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
     server_cls = DualStackServer if ":" in HOST else ThreadingHTTPServer
     try:
