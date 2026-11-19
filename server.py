@@ -54,11 +54,24 @@ STATIC = ROOT / "static"
 # Windows consoles/pipes may default to a legacy code page (cp1252/cp936...);
 # our log/UI strings are Chinese, and a UnicodeEncodeError while *reporting*
 # an error must never kill the server. Force UTF-8 with replacement.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+for _name in ("stdout", "stderr"):
+    _stream = getattr(sys, _name, None)
+    if _stream is None:
+        # pythonw.exe gives the process NO console streams (None). Any
+        # later write (request logging, prints) would raise and kill the
+        # request handler mid-response; give the process real null
+        # streams instead. (Field bug, 2026-11-19: the backend listened
+        # but every request died in log_message -> ERR_EMPTY_RESPONSE,
+        # and the panel reported a healthy backend as stopped.)
+        try:
+            setattr(sys, _name, open(os.devnull, "w", encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+    else:
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 def _env(name, default=""):
     """Read a TOFETCH_* environment variable."""
@@ -1098,7 +1111,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- plumbing ------------------------------------------------------
     def log_message(self, fmt, *args):  # keep the console quiet
-        sys.stderr.write("[tofetch] %s - %s\n" % (self.address_string(), fmt % args))
+        try:
+            sys.stderr.write("[tofetch] %s - %s\n" % (self.address_string(), fmt % args))
+        except Exception:
+            pass  # logging must never kill a request (pythonw: no stderr)
 
     def _send(self, code, body: bytes, ctype="application/json; charset=utf-8", extra=None):
         self.send_response(code)
