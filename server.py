@@ -88,6 +88,8 @@ RPC_PORT = int(os.environ.get("ARIA2_RPC_PORT", "6800"))
 RPC_URL = f"http://127.0.0.1:{RPC_PORT}/jsonrpc"
 AUTOSTART = os.environ.get("ARIA2_AUTOSTART", "1") == "1"
 
+VERSION = "1.5.0"
+
 SESSIONS = set()  # live login tokens (in memory only)
 
 # Request-body caps for POST endpoints: JSON calls are tiny; the torrent
@@ -1221,6 +1223,77 @@ def win_set_autostart(on: bool) -> dict:
     return st
 
 
+# -- native folder picker bridge (Windows package only) ----------------
+# The web page cannot open a native folder dialog, and a browser picker
+# would never hand it a real path anyway. Instead the backend asks the
+# shell exe to show the system folder dialog (IFileDialog); the exe
+# posts the chosen path back here and the page polls for it. Tokens are
+# random, single-use and short-lived. The result route is the one route
+# that skips the session gate - the exe holds no login cookie - so it
+# demands a loopback peer plus a live token instead.
+PICK_TOKENS = {}  # token -> {"done": bool, "path": str|None, "expires": float}
+_pick_lock = threading.Lock()
+try:
+    _PICK_TTL = float(_env("PICK_TTL", "300"))  # tests shorten it
+except ValueError:
+    _PICK_TTL = 300.0
+
+
+def _pick_prune() -> None:
+    now = time.time()
+    for t in [t for t, v in PICK_TOKENS.items() if v["expires"] <= now]:
+        PICK_TOKENS.pop(t, None)
+
+
+def pick_create() -> str:
+    """Mint a picker token and ask the shell exe to show the dialog."""
+    token = secrets.token_urlsafe(24)
+    with _pick_lock:
+        _pick_prune()
+        PICK_TOKENS[token] = {"done": False, "path": None,
+                              "expires": time.time() + _PICK_TTL}
+    if os.name == "nt":
+        exe = _shell_exe()
+        if exe.exists():
+            try:
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                subprocess.Popen([str(exe), "--pick-folder", token],
+                                 creationflags=flags)
+            except Exception:
+                pass  # token stays valid; the page's poll just times out
+    return token
+
+
+def pick_result(token: str, path) -> int:
+    """Record the exe's answer; returns an HTTP status code."""
+    with _pick_lock:
+        ent = PICK_TOKENS.get(token)
+        if ent is None or ent["expires"] <= time.time():
+            PICK_TOKENS.pop(token, None)
+            return 404
+        if ent["done"]:
+            return 409
+        ent["done"] = True
+        ent["path"] = path
+    return 200
+
+
+def pick_poll(token: str):
+    """(status, payload) for the web page's polling. A finished token
+    is consumed by the poll that reports it - it cannot be read twice."""
+    with _pick_lock:
+        ent = PICK_TOKENS.get(token)
+        if ent is None:
+            return 404, {"error": "unknown token"}
+        if ent["expires"] <= time.time():
+            PICK_TOKENS.pop(token, None)
+            return 410, {"error": "picker expired"}
+        if not ent["done"]:
+            return 200, {"done": False}
+        PICK_TOKENS.pop(token, None)
+        return 200, {"done": True, "path": ent["path"]}
+
+
 # -- graceful self-shutdown (local packages only) --------------------------
 HTTPD = None  # set by main()
 
@@ -1243,7 +1316,7 @@ def request_shutdown(delay: float = 0.4) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToFetch/1.4.0"
+    server_version = "ToFetch/" + VERSION
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ------------------------------------------------------
@@ -1320,7 +1393,7 @@ class Handler(BaseHTTPRequestHandler):
                 "password": bool(PASSWORD),
                 "download_dir": str(DOWNLOAD_DIR),
                 "platform": PLATFORM,
-                "version": "1.4.0",
+                "version": VERSION,
             })
         if path == "/api/win/state":
             if not self._authed():
@@ -1329,6 +1402,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.NOT_FOUND,
                                   {"error": "windows integration unavailable"})
             return self._json(200, win_state())
+        if path == "/api/win/pick-folder":
+            if not self._authed():
+                return self._need_auth()
+            if not WIN_AVAILABLE or not LOCAL_BIND:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "native picker unavailable"})
+            q = parse_qs(urlparse(self.path).query)
+            code, payload = pick_poll((q.get("token") or [""])[0])
+            return self._json(code, payload)
         if path == "/api/fs":
             if not self._authed():
                 return self._need_auth()
@@ -1481,6 +1563,24 @@ class Handler(BaseHTTPRequestHandler):
             if morsel:
                 SESSIONS.discard(morsel.value)
             return self._json(200, {"ok": True})
+        if path == "/api/win/pick-folder/result":
+            # The shell exe posts the dialog result here. It holds no
+            # login cookie, so this route trades the session gate for a
+            # loopback peer plus the one-shot token itself.
+            peer = self.client_address[0]
+            if peer not in ("127.0.0.1", "::1") or not WIN_AVAILABLE:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "native picker unavailable"})
+            body = self._read_json()
+            picked = body.get("path")
+            if picked is not None and (not isinstance(picked, str)
+                                       or len(picked) > 1000):
+                return self._json(HTTPStatus.BAD_REQUEST,
+                                  {"error": "bad path"})
+            code = pick_result(str(body.get("token") or ""), picked)
+            if code != 200:
+                return self._json(code, {"error": "unknown or used token"})
+            return self._json(200, {"ok": True})
         if not self._authed():
             return self._need_auth()
         if path == "/api/fs/mkdir":
@@ -1495,6 +1595,11 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("path") or ""), str(body.get("name") or "")))
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
+        if path == "/api/win/pick-folder":
+            if not WIN_AVAILABLE or not LOCAL_BIND:
+                return self._json(HTTPStatus.NOT_FOUND,
+                                  {"error": "native picker unavailable"})
+            return self._json(200, {"token": pick_create()})
         if path in ("/api/win/assoc", "/api/win/autostart"):
             if not WIN_AVAILABLE:
                 return self._json(HTTPStatus.NOT_FOUND,
