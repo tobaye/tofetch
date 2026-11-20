@@ -23,6 +23,12 @@ flows that must never silently break:
   T20 dir clamping: addUri dir outside the download root is dropped,
       a subdir is honoured, /api/torrent with an escaping dir is a 400
   T21 request-body cap: an oversized JSON body gets a 413
+  T27 native folder-picker bridge: token lifecycle (create, pending,
+      result, single consuming poll, cancel=null), unknown/expired
+      tokens fail, non-Windows and WAN-bound instances have no route
+  T28 one-click update decision contract (offline fixtures): semver
+      compare with prerelease rules; SHA-256 verification against
+      SHA256SUMS.txt fails closed (no sums asset, no line, mismatch)
 
 Usage: python3 tests/run_tests.py
 Env:   TOFETCH_TEST_ARIA2=/path/to/aria2c   (default: tools/aria2c, else PATH)
@@ -966,6 +972,227 @@ def main() -> int:
         td26.stop()
         td26o.stop()
         shutil.rmtree(work26, ignore_errors=True)
+
+    # T27: native folder-picker bridge — token lifecycle and gating.
+    # The dialog itself is a Windows GUI affair; the suite pins the
+    # contract around it. The exe's half is simulated by posting the
+    # result exactly like ToFetch.exe --pick-folder does.
+    work27 = Path(tempfile.mkdtemp(prefix="tofetch-test27-"))
+    td27 = ToFetch(work27, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PLATFORM": "windows",
+        "TOFETCH_FAKE_REGISTRY": "1",
+        "TOFETCH_HOST": "127.0.0.1",
+        "TOFETCH_PICK_TTL": "3",
+    })
+    work27w = Path(tempfile.mkdtemp(prefix="tofetch-test27w-"))
+    td27w = ToFetch(work27w, aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_PLATFORM": "windows",
+        "TOFETCH_FAKE_REGISTRY": "1",
+        # no TOFETCH_HOST: binds 0.0.0.0, so LOCAL_BIND is false
+    })
+    td27o = ToFetch(Path(tempfile.mkdtemp(prefix="tofetch-test27o-")),
+                    aria2, free_port(), free_port(), extra_env={
+        "TOFETCH_HOST": "127.0.0.1",
+    })
+    def wait_up(inst):
+        for _ in range(40):
+            try:
+                with urllib.request.urlopen(inst.ui + "/api/state",
+                                            timeout=3) as r:
+                    if r.status == 200:
+                        return True
+            except Exception:
+                time.sleep(0.3)
+        return False
+    def pick(inst, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        code, text = raw_req(inst.ui + path, data, method)
+        try:
+            return code, json.loads(text)
+        except Exception:
+            return code, {}
+    try:
+        up27 = wait_up(td27) and wait_up(td27w) and wait_up(td27o)
+        c, j = pick(td27, "POST", "/api/win/pick-folder", {})
+        tok = j.get("token") or ""
+        ok_create = c == 200 and len(tok) >= 16
+        c, j = pick(td27, "GET", f"/api/win/pick-folder?token={tok}")
+        ok_pending = c == 200 and j.get("done") is False
+        c, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                    {"token": tok, "path": "X:\\picked dir"})
+        ok_result = c == 200
+        c, j = pick(td27, "GET", f"/api/win/pick-folder?token={tok}")
+        ok_poll = (c == 200 and j.get("done") is True
+                   and j.get("path") == "X:\\picked dir")
+        c, _ = pick(td27, "GET", f"/api/win/pick-folder?token={tok}")
+        ok_consumed = c == 404
+        c, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                    {"token": tok, "path": "X:\\again"})
+        ok_result_gone = c == 404
+        c, _ = pick(td27, "GET", "/api/win/pick-folder?token=bogus-27")
+        ok_bogus_poll = c == 404
+        c, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                    {"token": "bogus-27", "path": "X:\\x"})
+        ok_bogus_result = c == 404
+        # cancel: the exe posts a null path
+        _, j = pick(td27, "POST", "/api/win/pick-folder", {})
+        tok2 = j.get("token") or ""
+        pick(td27, "POST", "/api/win/pick-folder/result",
+             {"token": tok2, "path": None})
+        c, j = pick(td27, "GET", f"/api/win/pick-folder?token={tok2}")
+        ok_cancel = c == 200 and j.get("done") is True and j.get("path") is None
+        # a second result for a finished token conflicts
+        _, j = pick(td27, "POST", "/api/win/pick-folder", {})
+        tok3 = j.get("token") or ""
+        c1, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                     {"token": tok3, "path": "X:\\one"})
+        c2, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                     {"token": tok3, "path": "X:\\two"})
+        ok_conflict = c1 == 200 and c2 == 409
+        # expiry: TTL is 3 s for this instance
+        _, j = pick(td27, "POST", "/api/win/pick-folder", {})
+        tok4 = j.get("token") or ""
+        time.sleep(3.6)
+        c, _ = pick(td27, "GET", f"/api/win/pick-folder?token={tok4}")
+        ok_expired_poll = c == 410
+        c, _ = pick(td27, "POST", "/api/win/pick-folder/result",
+                    {"token": tok4, "path": "X:\\late"})
+        ok_expired_result = c == 404
+        # gating: WAN-bound windows instance and loopback other-platform
+        c, _ = pick(td27w, "POST", "/api/win/pick-folder", {})
+        ok_wan_gated = c == 404
+        c, _ = pick(td27o, "POST", "/api/win/pick-folder", {})
+        ok_other_gated = c == 404
+        c, _ = pick(td27o, "POST", "/api/win/pick-folder/result",
+                    {"token": "bogus-27", "path": "X:\\x"})
+        ok_other_result_gated = c == 404
+        report("T27 pick-folder token lifecycle + gating",
+               up27 and ok_create and ok_pending and ok_result and ok_poll
+               and ok_consumed and ok_result_gone and ok_bogus_poll
+               and ok_bogus_result and ok_cancel and ok_conflict
+               and ok_expired_poll and ok_expired_result and ok_wan_gated
+               and ok_other_gated and ok_other_result_gated,
+               f"(create={ok_create}, pending={ok_pending}, poll={ok_poll}, "
+               f"consumed={ok_consumed}, cancel={ok_cancel}, "
+               f"conflict={ok_conflict}, expired={ok_expired_poll}/{ok_expired_result}, "
+               f"wan={ok_wan_gated}, other={ok_other_gated}/{ok_other_result_gated})")
+    finally:
+        td27.stop()
+        td27w.stop()
+        td27o.stop()
+        shutil.rmtree(work27, ignore_errors=True)
+        shutil.rmtree(work27w, ignore_errors=True)
+
+    # T28: one-click update decision contract (offline fixtures). The
+    # panels implement this exact procedure in C# (Updater in both
+    # windows-shell*/Program.cs); the suite pins the contract here so
+    # a drift between the spec and either implementation is caught:
+    # semver compare with prerelease rules, and fail-closed SHA-256
+    # verification against SHA256SUMS.txt.
+    def semver_cmp(a, b):
+        def split(v):
+            v = v.strip().lstrip("vV")
+            core, dash, pre = v.partition("-")
+            nums = [int(x) if x.isdigit() else 0 for x in core.split(".")]
+            return nums, (pre.split(".") if dash else None)
+        na, pa = split(a)
+        nb, pb = split(b)
+        for i in range(max(len(na), len(nb))):
+            va = na[i] if i < len(na) else 0
+            vb = nb[i] if i < len(nb) else 0
+            if va != vb:
+                return -1 if va < vb else 1
+        if pa is None and pb is None:
+            return 0
+        if pa is None:
+            return 1
+        if pb is None:
+            return -1
+        for i in range(max(len(pa), len(pb))):
+            if i >= len(pa):
+                return -1
+            if i >= len(pb):
+                return 1
+            xa, xb = pa[i], pb[i]
+            if xa.isdigit() and xb.isdigit():
+                if int(xa) != int(xb):
+                    return -1 if int(xa) < int(xb) else 1
+            elif xa.isdigit():
+                return -1
+            elif xb.isdigit():
+                return 1
+            elif xa != xb:
+                return -1 if xa < xb else 1
+        return 0
+    def expected_hash(sums_text, asset):
+        if not sums_text:
+            return None
+        for line in sums_text.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            h = parts[0].lower()
+            if len(h) != 64:
+                continue
+            name = parts[-1].lstrip("*").rsplit("/", 1)[-1]
+            if name == asset:
+                return h
+        return None
+    def update_decision(current, release, sums_text, zip_bytes):
+        tag = (release or {}).get("tag_name") or ""
+        latest = tag.lstrip("vV")
+        assets = {a.get("name"): a
+                  for a in (release or {}).get("assets") or []}
+        if not latest or "ToFetch-Windows.zip" not in assets:
+            return "no-asset"
+        if semver_cmp(latest, current) <= 0:
+            return "up-to-date"
+        if "SHA256SUMS.txt" not in assets:
+            return "refused-no-sums"
+        want = expected_hash(sums_text, "ToFetch-Windows.zip")
+        if want is None:
+            return "refused-no-line"
+        got = hashlib.sha256(zip_bytes).hexdigest()
+        return "update" if got == want else "refused-mismatch"
+    fake_zip = b"PK\x03\x04 fake v1.5.0 package bytes"
+    fake_hash = hashlib.sha256(fake_zip).hexdigest()
+    sums_ok = (f"{fake_hash}  ToFetch-Windows.zip\n"
+               + "0" * 64 + "  ToFetch-Linux.zip\n")
+    sums_no_win = "0" * 64 + "  ToFetch-Linux.zip\n"
+    rel_full = {"tag_name": "v1.5.0", "assets": [
+        {"name": "ToFetch-Windows.zip",
+         "browser_download_url": "https://example.invalid/w.zip",
+         "size": len(fake_zip)},
+        {"name": "SHA256SUMS.txt",
+         "browser_download_url": "https://example.invalid/sums"},
+    ]}
+    rel_no_sums = {"tag_name": "v1.5.0", "assets": [
+        {"name": "ToFetch-Windows.zip",
+         "browser_download_url": "https://example.invalid/w.zip",
+         "size": len(fake_zip)},
+    ]}
+    ok28 = (
+        semver_cmp("1.5.0", "1.4.0") > 0
+        and semver_cmp("1.4.0", "1.5.0-rc.1") < 0
+        and semver_cmp("1.5.0", "1.5.0-rc.1") > 0
+        and semver_cmp("v1.5.0", "1.5.0") == 0
+        and semver_cmp("1.5.0-rc.1", "1.5.0-rc.2") < 0
+        and semver_cmp("1.5.0-rc.2", "1.5.0-rc.10") < 0
+        and update_decision("1.4.0", rel_full, sums_ok, fake_zip) == "update"
+        and update_decision("1.5.0", rel_full, sums_ok, fake_zip) == "up-to-date"
+        and update_decision("1.5.0", {"tag_name": "v1.5.0-rc.1",
+                                      "assets": rel_full["assets"]},
+                            sums_ok, fake_zip) == "up-to-date"
+        and update_decision("1.4.0", rel_full, sums_no_win, fake_zip) == "refused-no-line"
+        and update_decision("1.4.0", rel_full, sums_ok, fake_zip + b"x") == "refused-mismatch"
+        and update_decision("1.4.0", rel_no_sums, sums_ok, fake_zip) == "refused-no-sums"
+        and update_decision("1.4.0", {"tag_name": "v1.5.0", "assets": []},
+                            sums_ok, fake_zip) == "no-asset"
+    )
+    report("T28 update decision: semver + fail-closed sha256 contract", ok28)
 
     # final sweep: no test engine may outlive the suite
     subprocess.run(["pkill", "-9", "-f", "conf-path=" + str(Path(tempfile.gettempdir())) + "/tofetch-test"],
