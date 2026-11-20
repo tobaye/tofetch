@@ -1,3 +1,4 @@
+# packages workflow: build release packages (incl. WebView2 flavor) + SHA256SUMS.txt
 name: packages
 
 # Assemble the three local packages (scripts/build_packages.py, all
