@@ -44,4 +44,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: gh release upload "$TAG" dist/ToFetch-Windows.zip dist/ToFetch-Linux.zip dist/ToFetch-Android.zip dist/ToFetch-Connect.zip --clobber
+        run: gh release upload "$TAG" dist/ToFetch-Windows.zip dist/ToFetch-Windows-WebView2.zip dist/ToFetch-Linux.zip dist/ToFetch-Android.zip dist/ToFetch-Connect.zip dist/SHA256SUMS.txt --clobber
