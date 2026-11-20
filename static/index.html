@@ -1272,6 +1272,28 @@ function renderDir(d){
     box.innerHTML += '<div class="hint" style="padding:7px 8px">（没有子文件夹）</div>';
 }
 async function openDirPicker(){
+  // Native first: the backend asks the shell exe to show the system
+  // folder dialog (the modern IFileDialog, same as Firefox's download
+  // settings) and the choice is polled back here. Backends without
+  // the route (older builds, non-Windows packages) answer 404 - then
+  // the built-in list picker below is the fallback.
+  if (window.__winLocal){
+    try{
+      const r = await fetch("/api/win/pick-folder", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (r.status === 401){ showLogin(); return; }
+      if (r.ok){
+        const j = await r.json();
+        if (j.token){
+          const picked = await pollPickFolder(j.token);
+          if (picked !== undefined){
+            if (picked) $("#setDir").value = picked;
+            return;
+          }
+        }
+      }
+    }catch(e){ /* fall through to the list picker */ }
+  }
   dirDlg.showModal();
   const start = $("#setDir").value.trim() || window.__dlDir || "";
   try { renderDir(await fsList(start)); }
@@ -1279,6 +1301,23 @@ async function openDirPicker(){
     try { renderDir(await fsList("")); }
     catch(e2){ $("#dirList").textContent = "打不开目录列表"; }
   }
+}
+async function pollPickFolder(token){
+  // Chosen path ("" when the dialog was cancelled or never answered),
+  // or undefined when the native route itself failed - the caller
+  // then falls back to the list picker.
+  const end = Date.now() + 120000;
+  while (Date.now() < end){
+    await new Promise(res => setTimeout(res, 600));
+    let r;
+    try{ r = await fetch("/api/win/pick-folder?token=" + encodeURIComponent(token)); }
+    catch(e){ return undefined; }
+    if (r.status === 404 || r.status === 410) return undefined;
+    if (!r.ok) continue;
+    const j = await r.json();
+    if (j.done) return j.path || "";
+  }
+  return "";
 }
 function pickDir(){
   if (dirPath) $("#setDir").value = dirPath;
