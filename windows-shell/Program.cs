@@ -11,6 +11,14 @@
 //   ToFetch.exe --background         -> service + tray only (autostart)
 //   ToFetch.exe                      -> panel + service + tray
 //
+// One-shot helper modes (no panel, no tray, exit when done):
+//   ToFetch.exe --pick-folder <token>
+//       Show the system folder dialog for the web UI's "browse"
+//       button and post the choice back to the backend.
+//   ToFetch.exe --apply-update <zip> <panel-pid> <install-dir>
+//       Relay half of the one-click update: runs from a temp copy so
+//       the panel's own exe can be replaced once the panel exits.
+//
 // .NET Framework 4.8 WinForms only - no external packages, so the exe
 // stays tiny and runs on a stock Windows 10/11 install.
 using System;
@@ -18,7 +26,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,7 +41,12 @@ namespace ToFetchPanel
 {
     internal static class Cfg
     {
-        public const string Version = "1.4.0";
+        public const string Version = "1.5.0";
+        // This flavor's own release asset. The one-click updater only
+        // ever downloads this name - flavors never cross-update.
+        public const string AssetName = "ToFetch-Windows.zip";
+        public const string RepoLatest =
+            "https://api.github.com/repos/tobaye/tofetch/releases/latest";
         public const string Base = "http://127.0.0.1:8077";
         public static string Home
         {
@@ -256,6 +272,517 @@ namespace ToFetchPanel
         }
     }
 
+    internal static class FolderDialog
+    {
+        // The modern Explorer-style folder dialog (IFileDialog with
+        // FOS_PICKFOLDERS) - the one Firefox/Chrome show for their
+        // download folder. The old FolderBrowserDialog tree is not
+        // acceptable (user, 2026-11-19). Hand-written COM interop,
+        // no external packages.
+        private const uint FOS_PICKFOLDERS = 0x00000020;
+        private const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        private const uint FOS_PATHMUSTEXIST = 0x00000800;
+        private const uint SIGDN_FILESYSPATH = 0x80058000;
+
+        /// <summary>Chosen absolute path, or null when cancelled.</summary>
+        public static string Pick(IntPtr owner, string initialDir, string title)
+        {
+            IFileOpenDialog dlg = null;
+            try
+            {
+                dlg = (IFileOpenDialog)new FileOpenDialogCoClass();
+                dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
+                               | FOS_PATHMUSTEXIST);
+                if (!string.IsNullOrEmpty(title)) dlg.SetTitle(title);
+                if (!string.IsNullOrEmpty(initialDir)
+                    && Directory.Exists(initialDir))
+                {
+                    IShellItem folder;
+                    var iid = new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+                    if (SHCreateItemFromParsingName(initialDir, IntPtr.Zero,
+                            ref iid, out folder) == 0 && folder != null)
+                    {
+                        try { dlg.SetFolder(folder); } catch { }
+                        Marshal.ReleaseComObject(folder);
+                    }
+                }
+                if (dlg.Show(owner) != 0) return null;  // cancelled
+                IShellItem item;
+                dlg.GetResult(out item);
+                if (item == null) return null;
+                try
+                {
+                    string path;
+                    item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                    return path;
+                }
+                finally { Marshal.ReleaseComObject(item); }
+            }
+            catch { return null; }
+            finally
+            {
+                if (dlg != null) Marshal.ReleaseComObject(dlg);
+            }
+        }
+
+        [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
+         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItem
+        {
+            void BindToHandler(IntPtr pbc, [In] ref Guid bhid,
+                               [In] ref Guid riid, out IntPtr ppv);
+            void GetParent(
+                [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+            void GetDisplayName(uint sigdnName,
+                [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+            void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+            void Compare(
+                [MarshalAs(UnmanagedType.Interface)] IShellItem psi,
+                uint hint, out int piOrder);
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct COMDLG_FILTERSPEC
+        {
+            [MarshalAs(UnmanagedType.LPWStr)] public string pszName;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pszSpec;
+        }
+
+        [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960"),
+         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFileOpenDialog
+        {
+            // IFileDialog, in vtable order
+            [PreserveSig] int Show(IntPtr hwndOwner);
+            void SetFileTypes(uint cFileTypes,
+                              [In] COMDLG_FILTERSPEC[] rgFilterSpec);
+            void SetFileTypeIndex(uint iFileType);
+            void GetFileTypeIndex(out uint piFileType);
+            void Advise([MarshalAs(UnmanagedType.Interface)] object pfde,
+                        out uint pdwCookie);
+            void Unadvise(uint dwCookie);
+            void SetOptions(uint fos);
+            void GetOptions(out uint pfos);
+            void SetDefaultFolder(
+                [MarshalAs(UnmanagedType.Interface)] IShellItem psi);
+            void SetFolder(
+                [MarshalAs(UnmanagedType.Interface)] IShellItem psi);
+            void GetFolder(
+                [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+            void GetCurrentSelection(
+                [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetFileName(
+                [MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            void SetOkButtonLabel(
+                [MarshalAs(UnmanagedType.LPWStr)] string pszText);
+            void SetFileNameLabel(
+                [MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+            void GetResult(
+                [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+            void AddPlace(
+                [MarshalAs(UnmanagedType.Interface)] IShellItem psi,
+                uint fdap);
+            void SetDefaultExtension(
+                [MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+            void Close(int hr);
+            void SetClientGuid([In] ref Guid guid);
+            void ClearClientData();
+            void SetFilter([MarshalAs(UnmanagedType.Interface)] object pFilter);
+            // IFileOpenDialog
+            void GetResults(
+                [MarshalAs(UnmanagedType.Interface)] out object ppenum);
+            void GetSelectedItems(
+                [MarshalAs(UnmanagedType.Interface)] out object ppsai);
+        }
+
+        [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class FileOpenDialogCoClass { }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SHCreateItemFromParsingName(
+            string pszPath, IntPtr pbc, ref Guid riid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+    }
+
+    internal sealed class ReleaseInfo
+    {
+        public string Version = "";   // tag without the leading "v"
+        public string AssetUrl = "";
+        public long AssetSize;
+        public string SumsUrl = "";   // "" when the release has none
+    }
+
+    internal static class Updater
+    {
+        // GitHub traffic may legitimately need the system proxy - the
+        // loopback Api client disables it on purpose; this one doesn't.
+        private static readonly HttpClient Net = new HttpClient();
+        private static readonly JavaScriptSerializer Json =
+            new JavaScriptSerializer();
+
+        static Updater()
+        {
+            try
+            {
+                Net.DefaultRequestHeaders.UserAgent.ParseAdd(
+                    "ToFetch/" + Cfg.Version);
+                Net.Timeout = TimeSpan.FromMinutes(20);
+            }
+            catch { }
+        }
+
+        /// <summary>Semver-ish compare: -1 / 0 / 1. A release
+        /// outranks its own prereleases (1.5.0 &gt; 1.5.0-rc.1).</summary>
+        public static int CompareVersions(string a, string b)
+        {
+            string coreA, coreB;
+            string[] preA, preB;
+            SplitVersion(a, out coreA, out preA);
+            SplitVersion(b, out coreB, out preB);
+            var na = coreA.Split('.');
+            var nb = coreB.Split('.');
+            for (int i = 0; i < Math.Max(na.Length, nb.Length); i++)
+            {
+                int va = i < na.Length ? CoreNum(na[i]) : 0;
+                int vb = i < nb.Length ? CoreNum(nb[i]) : 0;
+                if (va != vb) return va < vb ? -1 : 1;
+            }
+            if (preA == null && preB == null) return 0;
+            if (preA == null) return 1;
+            if (preB == null) return -1;
+            for (int i = 0; i < Math.Max(preA.Length, preB.Length); i++)
+            {
+                if (i >= preA.Length) return -1;
+                if (i >= preB.Length) return 1;
+                int ia, ib;
+                bool isNumA = int.TryParse(preA[i], out ia);
+                bool isNumB = int.TryParse(preB[i], out ib);
+                if (isNumA && isNumB)
+                {
+                    if (ia != ib) return ia < ib ? -1 : 1;
+                }
+                else if (isNumA) return -1;  // numeric < alphanumeric
+                else if (isNumB) return 1;
+                else
+                {
+                    int c = string.CompareOrdinal(preA[i], preB[i]);
+                    if (c != 0) return c < 0 ? -1 : 1;
+                }
+            }
+            return 0;
+        }
+
+        private static void SplitVersion(string v, out string core,
+                                         out string[] pre)
+        {
+            v = (v ?? "").Trim();
+            if (v.StartsWith("v") || v.StartsWith("V")) v = v.Substring(1);
+            int dash = v.IndexOf('-');
+            if (dash < 0) { core = v; pre = null; }
+            else
+            {
+                core = v.Substring(0, dash);
+                pre = v.Substring(dash + 1).Split('.');
+            }
+        }
+
+        private static int CoreNum(string s)
+        {
+            int n;
+            return int.TryParse(s, out n) ? n : 0;
+        }
+
+        public static ReleaseInfo FetchLatest(out string error)
+        {
+            error = null;
+            try
+            {
+                var text = Net.GetStringAsync(Cfg.RepoLatest)
+                              .GetAwaiter().GetResult();
+                var root = Json.Deserialize<Dictionary<string, object>>(text);
+                var rel = new ReleaseInfo();
+                object tag;
+                if (root == null || !root.TryGetValue("tag_name", out tag)
+                    || tag == null)
+                {
+                    error = "GitHub 返回的内容里没有版本号";
+                    return null;
+                }
+                rel.Version = tag.ToString().TrimStart('v', 'V');
+                object assetsObj;
+                var assets = root.TryGetValue("assets", out assetsObj)
+                    ? assetsObj as object[] : null;
+                if (assets != null)
+                {
+                    foreach (var a in assets)
+                    {
+                        var d = a as Dictionary<string, object>;
+                        if (d == null) continue;
+                        var name = Api.Str(d, "name");
+                        if (name == Cfg.AssetName)
+                        {
+                            rel.AssetUrl = Api.Str(d, "browser_download_url");
+                            object sz;
+                            if (d.TryGetValue("size", out sz) && sz != null)
+                                rel.AssetSize = Convert.ToInt64(sz);
+                        }
+                        else if (name == "SHA256SUMS.txt")
+                        {
+                            rel.SumsUrl = Api.Str(d, "browser_download_url");
+                        }
+                    }
+                }
+                if (rel.AssetUrl.Length == 0)
+                {
+                    error = "最新版里没有 " + Cfg.AssetName + " 这个包";
+                    return null;
+                }
+                return rel;
+            }
+            catch (Exception ex)
+            {
+                error = "连不上 GitHub（" + ex.Message + "）";
+                return null;
+            }
+        }
+
+        /// <summary>The sha256 recorded for an asset, or null. The
+        /// sums file is the only source of truth - no line, no trust.</summary>
+        public static string ExpectedHash(string sumsText, string assetName)
+        {
+            if (string.IsNullOrEmpty(sumsText)) return null;
+            foreach (var rawLine in sumsText.Split('\n'))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                var parts = line.Split(new[] { ' ', '\t' },
+                                       StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2) continue;
+                var hash = parts[0].ToLowerInvariant();
+                if (hash.Length != 64) continue;
+                var name = parts[parts.Length - 1].TrimStart('*');
+                int slash = name.LastIndexOf('/');
+                if (slash >= 0) name = name.Substring(slash + 1);
+                if (string.Equals(name, assetName, StringComparison.Ordinal))
+                    return hash;
+            }
+            return null;
+        }
+
+        /// <summary>Fail-closed verification of a downloaded zip:
+        /// no sums asset, no line for our asset, or a hash mismatch
+        /// all refuse the update.</summary>
+        public static bool VerifyDownloaded(string zipPath, ReleaseInfo rel,
+                                            out string error)
+        {
+            error = null;
+            if (rel.SumsUrl.Length == 0)
+            {
+                error = "最新版没有附 SHA256SUMS.txt 校验文件，拒绝更新";
+                return false;
+            }
+            string sums;
+            try
+            {
+                sums = Net.GetStringAsync(rel.SumsUrl)
+                          .GetAwaiter().GetResult();
+            }
+            catch
+            {
+                error = "校验文件下载失败，拒绝更新";
+                return false;
+            }
+            var want = ExpectedHash(sums, Cfg.AssetName);
+            if (want == null)
+            {
+                error = "校验文件里没有 " + Cfg.AssetName + " 的记录，拒绝更新";
+                return false;
+            }
+            string got;
+            using (var fs = File.OpenRead(zipPath))
+            using (var sha = SHA256.Create())
+                got = BitConverter.ToString(sha.ComputeHash(fs))
+                                  .Replace("-", "").ToLowerInvariant();
+            if (got != want)
+            {
+                error = "下载的包校验不通过（SHA-256 不一致），拒绝更新";
+                return false;
+            }
+            return true;
+        }
+
+        public static async Task Download(string url, string dest,
+                                          Action<int> onProgress)
+        {
+            using (var resp = await Net.GetAsync(
+                       url, HttpCompletionOption.ResponseHeadersRead))
+            {
+                resp.EnsureSuccessStatusCode();
+                long total = resp.Content.Headers.ContentLength ?? -1;
+                using (var src = await resp.Content.ReadAsStreamAsync())
+                using (var dst = File.Create(dest))
+                {
+                    var buf = new byte[1 << 16];
+                    long done = 0;
+                    int lastPct = -1, n;
+                    while ((n = await src.ReadAsync(buf, 0, buf.Length)) > 0)
+                    {
+                        await dst.WriteAsync(buf, 0, n);
+                        done += n;
+                        if (total > 0 && onProgress != null)
+                        {
+                            int pct = (int)(done * 100 / total);
+                            if (pct != lastPct)
+                            {
+                                lastPct = pct;
+                                onProgress(pct);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    internal static class UpdateRelay
+    {
+        // Second half of the one-click update. The panel copies itself
+        // to a temp dir and launches that copy with --apply-update;
+        // running from temp, this process may replace the panel's own
+        // exe once the panel has exited. The install's data/ folder
+        // (settings, history, sessions) is never backed up, replaced
+        // or restored - it simply stays where it is throughout.
+        public static void Run(string zip, int panelPid, string home)
+        {
+            try
+            {
+                if (panelPid > 0)
+                    Process.GetProcessById(panelPid).WaitForExit(30000);
+            }
+            catch { }
+            Thread.Sleep(800);
+            string parent = Directory.GetParent(home).FullName;
+            string oldVer = "old";
+            try
+            {
+                var fv = FileVersionInfo.GetVersionInfo(
+                    Path.Combine(home, "ToFetch.exe")).FileVersion;
+                if (!string.IsNullOrEmpty(fv))
+                {
+                    var p = fv.Split('.');
+                    oldVer = p.Length == 4 && p[3] == "0"
+                        ? string.Join(".", p, 0, 3) : fv;
+                }
+            }
+            catch { }
+            string backup = Path.Combine(parent, "ToFetch-backup-" + oldVer);
+            try
+            {
+                if (Directory.Exists(backup)) Directory.Delete(backup, true);
+                CopyTree(home, backup);
+                ExtractPackage(zip, home);
+                bool ok = File.Exists(Path.Combine(home, "ToFetch.exe"))
+                    && File.Exists(Path.Combine(home, "server.py"))
+                    && File.Exists(Path.Combine(home, "static", "index.html"));
+                if (!ok)
+                {
+                    // The new exe is gone (antivirus quarantine of the
+                    // unsigned binary - it has happened on the user's
+                    // machine) or the package was incomplete: put the
+                    // previous install back wholesale and say so.
+                    CopyTree(backup, home);
+                    MessageBox.Show(
+                        "更新没能完成：新版程序文件不完整，可能被杀毒软件隔离了。已恢复到更新前的版本。\n\n" +
+                        "请先把 " + home + " 整个文件夹加入杀毒软件的信任区，再重试检查更新。",
+                        "ToFetch 更新", MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { CopyTree(backup, home); } catch { }
+                MessageBox.Show(
+                    "更新没能完成（" + ex.Message + "），已恢复到更新前的版本。",
+                    "ToFetch 更新", MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            // Either way the (new or restored) panel comes back up.
+            try { Process.Start(Path.Combine(home, "ToFetch.exe")); }
+            catch { }
+        }
+
+        private static void CopyTree(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true);
+            foreach (var d in Directory.GetDirectories(src))
+            {
+                var name = Path.GetFileName(d);
+                // data/ holds settings/history/sessions: it is the
+                // one folder an update must never carry away or
+                // overwrite, so backups and restores skip it.
+                if (string.Equals(name, "data",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                CopyTree(d, Path.Combine(dst, name));
+            }
+        }
+
+        private static void ExtractPackage(string zip, string home)
+        {
+            using (var za = ZipFile.OpenRead(zip))
+            {
+                foreach (var entry in za.Entries)
+                {
+                    var name = entry.FullName.Replace('\\', '/');
+                    if (!name.StartsWith("ToFetch/")) continue;
+                    var rel = name.Substring("ToFetch/".Length);
+                    if (rel.Length == 0 || rel.EndsWith("/")) continue;
+                    if (rel == "data" || rel.StartsWith("data/")) continue;
+                    var dest = Path.GetFullPath(Path.Combine(home, rel));
+                    var root = Path.GetFullPath(home)
+                        + Path.DirectorySeparatorChar;
+                    if (!dest.StartsWith(root,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;  // zip-slip guard
+                    Directory.CreateDirectory(
+                        Path.GetDirectoryName(dest));
+                    entry.ExtractToFile(dest, true);
+                }
+            }
+        }
+    }
+
+    internal static class PickFolderMode
+    {
+        // One-shot: the backend minted a token, the web page is
+        // polling for the result. Show the dialog, post the choice
+        // back, exit - no panel, no tray, no service control.
+        public static void Run(string token)
+        {
+            string initial = "";
+            var st = Api.Get("/api/state", 3000);
+            if (st != null) initial = Api.Str(st, "download_dir");
+            if (initial.Length == 0 || !Directory.Exists(initial))
+                initial = Cfg.DownloadDir;
+            var chosen = FolderDialog.Pick(IntPtr.Zero, initial,
+                                           "选择下载目录");
+            try
+            {
+                Api.Post("/api/win/pick-folder/result",
+                    new Dictionary<string, object>
+                    {
+                        { "token", token },
+                        { "path", chosen },
+                    }, 10000);
+            }
+            catch { }
+        }
+    }
+
     internal static class Opener
     {
         // Registered handler path: a magnet link or .torrent file was
@@ -294,7 +821,10 @@ namespace ToFetchPanel
         private readonly Button _btnOpen = new Button();
         private readonly Button _btnStart = new Button();
         private readonly Button _btnStop = new Button();
+        private readonly Button _btnUpdate = new Button();
         private readonly Button _btnExit = new Button();
+        private ReleaseInfo _pendingUpdate;
+        private bool _updateBusy;
         private readonly CheckBox _chkAssoc = new CheckBox();
         private readonly CheckBox _chkAuto = new CheckBox();
         private readonly ComboBox _cmbBrowser = new ComboBox();
@@ -368,11 +898,11 @@ namespace ToFetchPanel
 
             _btnOpen.Text = "打开下载界面";
             _btnOpen.Location = new Point(12, 164);
-            _btnOpen.Size = new Size(150, 30);
+            _btnOpen.Size = new Size(140, 30);
             _btnOpen.Click += async (s, e) => { if (await Task.Run(() => Backend.EnsureStarted())) { _userStopped = false; Backend.OpenUi(); } };
             _btnStart.Text = "启动服务";
-            _btnStart.Location = new Point(172, 164);
-            _btnStart.Size = new Size(110, 30);
+            _btnStart.Location = new Point(162, 164);
+            _btnStart.Size = new Size(104, 30);
             _btnStart.Click += async (s, e) =>
             {
                 _userStopped = false;
@@ -380,10 +910,14 @@ namespace ToFetchPanel
                 RefreshState();
             };
             _btnStop.Text = "停止服务";
-            _btnStop.Location = new Point(292, 164);
-            _btnStop.Size = new Size(110, 30);
+            _btnStop.Location = new Point(276, 164);
+            _btnStop.Size = new Size(104, 30);
             _btnStop.Click += (s, e) => StopService();
-            Controls.AddRange(new Control[] { _btnOpen, _btnStart, _btnStop });
+            _btnUpdate.Text = "检查更新";
+            _btnUpdate.Location = new Point(390, 164);
+            _btnUpdate.Size = new Size(118, 30);
+            _btnUpdate.Click += async (s, e) => await CheckUpdate();
+            Controls.AddRange(new Control[] { _btnOpen, _btnStart, _btnStop, _btnUpdate });
 
             var gLocal = new GroupBox { Text = "本机集成（状态实时回读，改动立即生效）", Location = new Point(12, 206), Size = new Size(496, 166) };
             _chkAssoc.Text = "磁力链接与 .torrent 文件关联到 ToFetch";
@@ -475,6 +1009,7 @@ namespace ToFetchPanel
                 // backend is still coming up the panel must stay clickable.
                 if (!_userStopped) await Task.Run(() => Backend.EnsureStarted());
                 RefreshState();
+                CleanupUpdateBackup();
             };
             FormClosing += OnClosing;
         }
@@ -537,14 +1072,12 @@ namespace ToFetchPanel
             }
             var st = await Task.Run(() => Api.Get("/api/state", 3000));
             var cur = st == null ? "" : Api.Str(st, "download_dir");
-            string chosen;
-            using (var dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "选择下载目录（只影响之后新建的任务）";
-                if (cur.Length > 0 && Directory.Exists(cur)) dlg.SelectedPath = cur;
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                chosen = dlg.SelectedPath;
-            }
+            // The modern system dialog, on the UI thread (it is a
+            // modal COM dialog; the old FolderBrowserDialog tree is
+            // gone). It blocks like ShowDialog did - that is fine.
+            var chosen = FolderDialog.Pick(Handle, cur,
+                "选择下载目录（只影响之后新建的任务）");
+            if (chosen == null) return;
             var body = new Dictionary<string, object>
             {
                 { "global", new Dictionary<string, object> { { "dir", chosen } } },
@@ -562,6 +1095,141 @@ namespace ToFetchPanel
             else
                 Log("✗ 下载目录没有生效，现在仍是 " + (now.Length > 0 ? now : "未知"));
             RefreshState();
+        }
+
+        private void CleanupUpdateBackup()
+        {
+            // After a one-click update the relay leaves the previous
+            // install in a sibling ToFetch-backup-<ver> folder. Once
+            // the backend reports this panel's own version, the new
+            // build is proven good and the backup can go.
+            try
+            {
+                var parent = Directory.GetParent(Cfg.Home);
+                if (parent == null) return;
+                var st = Api.Get("/api/state", 2000);
+                if (st == null || Api.Str(st, "version") != Cfg.Version)
+                    return;
+                foreach (var dir in Directory.GetDirectories(
+                             parent.FullName, "ToFetch-backup-*"))
+                {
+                    try
+                    {
+                        Directory.Delete(dir, true);
+                        Log("✓ 更新完成，旧版备份已清理");
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private async Task CheckUpdate()
+        {
+            if (_updateBusy) return;
+            if (_pendingUpdate != null)
+            {
+                await ApplyPendingUpdate();
+                return;
+            }
+            _updateBusy = true;
+            _btnUpdate.Enabled = false;
+            Log("正在检查更新…");
+            string error = null;
+            ReleaseInfo rel = null;
+            try
+            {
+                rel = await Task.Run(() => Updater.FetchLatest(out error));
+            }
+            catch { }
+            _updateBusy = false;
+            _btnUpdate.Enabled = true;
+            if (rel == null)
+            {
+                Log("✗ 检查更新失败：" + (error ?? "连不上 GitHub"));
+                return;
+            }
+            if (Updater.CompareVersions(rel.Version, Cfg.Version) <= 0)
+            {
+                Log("✓ 已是最新版本（v" + Cfg.Version + "）");
+                return;
+            }
+            _pendingUpdate = rel;
+            _btnUpdate.Text = "更新到 v" + rel.Version;
+            Log("发现新版 v" + rel.Version + "（约 "
+                + (rel.AssetSize / 1048576.0).ToString("0.0")
+                + " MB）。再点一次「更新到 v" + rel.Version
+                + "」就下载并更新：更新会自动重启面板，下载目录、设置和任务都保留。");
+        }
+
+        private async Task ApplyPendingUpdate()
+        {
+            var rel = _pendingUpdate;
+            if (rel == null || _updateBusy) return;
+            _updateBusy = true;
+            _btnUpdate.Enabled = false;
+            try
+            {
+                var dir = Path.Combine(Path.GetTempPath(),
+                    "ToFetch-update", "v" + rel.Version);
+                Directory.CreateDirectory(dir);
+                var zip = Path.Combine(dir, Cfg.AssetName);
+                Log("正在下载 v" + rel.Version + "…");
+                int lastLog = -1;
+                await Updater.Download(rel.AssetUrl, zip, pct =>
+                {
+                    if (pct % 25 == 0 && pct != lastLog)
+                    {
+                        lastLog = pct;
+                        Log("下载中 " + pct + "%");
+                    }
+                });
+                Log("下载完成，正在校验…");
+                string error = null;
+                bool verified = await Task.Run(
+                    () => Updater.VerifyDownloaded(zip, rel, out error));
+                if (!verified)
+                {
+                    Log("✗ " + error + "，已放弃更新，旧版照常运行");
+                    return;
+                }
+                Log("✓ 校验通过，正在应用更新（面板会重启）…");
+                // Stop the service first so nothing holds files, then
+                // hand over to a temp copy of this exe: a running
+                // panel cannot overwrite its own binary.
+                await Task.Run(() =>
+                {
+                    Api.Post("/api/exit", new Dictionary<string, object>
+                        { { "mode", "stop" } }, 5000);
+                    for (int i = 0; i < 20 && Backend.IsUp(); i++)
+                        Thread.Sleep(500);
+                });
+                var relay = Path.Combine(dir, "ToFetch-relay.exe");
+                File.Copy(Application.ExecutablePath, relay, true);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = relay,
+                    Arguments = "--apply-update \"" + zip + "\" "
+                        + Process.GetCurrentProcess().Id
+                        + " \"" + Cfg.Home + "\"",
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                });
+                _reallyExit = true;
+                _tray.Visible = false;
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                Log("✗ 更新失败：" + ex.Message + "（旧版照常运行）");
+            }
+            finally
+            {
+                _updateBusy = false;
+                _btnUpdate.Enabled = true;
+                _pendingUpdate = null;
+                _btnUpdate.Text = "检查更新";
+            }
         }
 
         private void InitBrowserCombo()
@@ -700,6 +1368,22 @@ namespace ToFetchPanel
         [STAThread]
         private static void Main(string[] args)
         {
+            // One-shot helper modes first: they must never reach the
+            // panel mutex, the tray or the opener parsing below.
+            if (args.Length >= 4 && args[0] == "--apply-update")
+            {
+                int pid;
+                int.TryParse(args[2], out pid);
+                UpdateRelay.Run(args[1], pid, args[3]);
+                return;
+            }
+            if (args.Length >= 2 && args[0] == "--pick-folder")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                PickFolderMode.Run(args[1]);
+                return;
+            }
             string target = null;
             bool background = false;
             foreach (var a in args)
