@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Assemble the three local packages (Windows / Linux / Termux-Android).
+"""Assemble the local packages (Windows standard + Windows WebView2 /
+Linux / Termux-Android) plus the release checksum file.
 
 Everything heavy is downloaded fresh from its official source and
 verified against a pinned SHA-256 before it goes into a zip:
@@ -14,6 +15,12 @@ Layout sources: server.py / static / aria2.conf come from the repo root
 (single source of truth); launchers and readmes live in
 scripts/pkgfiles/. Output zips land in dist/ with the top-level folder
 names ToFetch/ , ToFetch-Linux/ , ToFetch-Android/.
+
+dist/SHA256SUMS.txt covers every zip built here, in sha256sum format.
+The panels' one-click updater refuses any download whose hash is not
+in that file (fail closed), so it must be attached to the release
+next to the zips. The browser-extension zip is assembled by the
+packages workflow after this script runs and is not covered.
 
 Usage: python3 scripts/build_packages.py [--no-download] (reuse cache/)
 """
@@ -115,6 +122,20 @@ def main() -> int:
             p.write_bytes(p.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
     zip_dir(win, "ToFetch", DIST / "ToFetch-Windows.zip", exec_names=set())
 
+    # ---- Windows WebView2 flavor: same layout, embedded shell.
+    # The top folder is ToFetch/ here too, so both flavors install
+    # identically and the update relay logic is shared verbatim.
+    wv2 = BUILD / "ToFetchWV2"
+    wv2.mkdir(parents=True)
+    copy_core(wv2)
+    with zipfile.ZipFile(blobs["python-embed.zip"]) as zf:
+        zf.extractall(wv2 / "python")
+    shutil.copy2(blobs["aria2-win.exe"], wv2 / "aria2c.exe")
+    for f in (PKGF / "windows-webview2").iterdir():
+        shutil.copy2(f, wv2 / f.name)
+    zip_dir(wv2, "ToFetch", DIST / "ToFetch-Windows-WebView2.zip",
+            exec_names=set())
+
     # ---- Linux: ToFetch-Linux/
     lin = BUILD / "ToFetch-Linux"
     lin.mkdir(parents=True)
@@ -135,6 +156,13 @@ def main() -> int:
         shutil.copy2(f, term / f.name)
     zip_dir(term, "ToFetch-Android", DIST / "ToFetch-Android.zip",
             exec_names={"install.sh", "aria2c"})
+
+    # ---- release checksums for the panels' one-click updater
+    names = ["ToFetch-Windows.zip", "ToFetch-Windows-WebView2.zip",
+             "ToFetch-Linux.zip", "ToFetch-Android.zip"]
+    sums = "".join(f"{sha256(DIST / n)}  {n}\n" for n in sorted(names))
+    (DIST / "SHA256SUMS.txt").write_text(sums, encoding="utf-8")
+    print(f"built {DIST / 'SHA256SUMS.txt'} ({len(names)} entries)")
     return 0
 
 
