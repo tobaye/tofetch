@@ -7,9 +7,9 @@
     <RootNamespace>ToFetchPanel</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <LangVersion>7.3</LangVersion>
-    <Version>1.4.0</Version>
-    <AssemblyVersion>1.4.0.0</AssemblyVersion>
-    <FileVersion>1.4.0.0</FileVersion>
+    <Version>1.5.0</Version>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
+    <FileVersion>1.5.0.0</FileVersion>
     <Product>ToFetch</Product>
     <Company>ToFetch</Company>
     <Description>ToFetch download manager - control panel</Description>
@@ -18,5 +18,7 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
 </Project>
